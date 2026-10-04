@@ -1,4 +1,4 @@
-# MoeKoe MPRIS（Linux）
+# MoeKoe MPRIS Lyrics（Linux）
 
 ⚠️VIBE CODING WARNING!
 
