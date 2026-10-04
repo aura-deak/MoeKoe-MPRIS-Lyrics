@@ -2,7 +2,9 @@
 
 ⚠️VIBE CODING WARNING!
 
-![alt text](image.png)
+
+[![](image.png)](player.bilibili.com/player.html?isOutside=true&aid=117383217808262&bvid=BV1YYH76FEm7&cid=42463002772&p=1)
+
 
 为 **MoeKoe Music** 提供 Linux 下的 **MPRIS2** 协议支持：在会话 D-Bus 上注册
 `org.mpris.MediaPlayer2.MoeKoeMusic`，把当前曲目、播放状态暴露给桌面组件，
