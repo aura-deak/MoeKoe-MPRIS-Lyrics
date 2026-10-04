@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>MoeKoe MPRIS</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="">
+    <div>
+      <h1>MoeKoe MPRIS</h1>
+      <p id="platform-tip">Linux 桌面歌词与播放状态传输</p>
+    </div>
+  </header>
+
+  <section>
+    <h2>连接状态</h2>
+    <ul class="status" id="status-list">
+      <li><span>D-Bus</span><b id="dbus-state">检测中…</b></li>
+      <li><span>MoeKoe API</span><b id="ws-state">检测中…</b></li>
+      <li><span>曲目</span><b id="track-state">—</b></li>
+      <li><span>进度</span><b id="position-state">—</b></li>
+    </ul>
+    <p class="notice" id="notice" hidden></p>
+    <pre class="command" id="chmod-command" hidden></pre>
+  </section>
+
+  <section>
+    <h2>歌词传输模式</h2>
+    <div class="modes" id="modes" role="radiogroup" aria-label="歌词传输模式">
+      <button type="button" data-mode="original" role="radio">
+        <strong>单歌词</strong>
+        <span>只传原文</span>
+      </button>
+      <button type="button" data-mode="translation" role="radio">
+        <strong>单翻译</strong>
+        <span>只传译文</span>
+      </button>
+      <button type="button" data-mode="both" role="radio">
+        <strong>歌词翻译</strong>
+        <span>原文 + 译文</span>
+      </button>
+    </div>
+    <p class="tip" id="mode-tip"></p>
+  </section>
+
+  <section>
+    <h2>悬浮歌词显示</h2>
+    <label class="switch-row">
+      <span>总开关</span>
+      <input type="checkbox" id="overlay-enabled">
+    </label>
+    <label class="switch-row">
+      <span>鼠标穿透</span>
+      <input type="checkbox" id="overlay-click-through">
+    </label>
+    <div class="setting-row">
+      <span>背景透明度</span>
+      <input type="range" id="overlay-opacity" min="0" max="100" step="5" value="62">
+      <b id="overlay-opacity-value">62%</b>
+    </div>
+    <div class="setting-row">
+      <span>显示位置</span>
+      <select id="overlay-position">
+        <option value="bottom-center">底部居中</option>
+        <option value="bottom-left">左下角</option>
+        <option value="bottom-right">右下角</option>
+        <option value="top-center">顶部居中</option>
+        <option value="top-left">左上角</option>
+        <option value="top-right">右上角</option>
+        <option value="custom" disabled>自定义（拖动设置）</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <span>缩放</span>
+      <input type="range" id="overlay-scale" min="50" max="200" step="10" value="100">
+      <b id="overlay-scale-value">100%</b>
+    </div>
+    <div class="setting-row">
+      <span>重启悬浮歌词</span>
+      <button type="button" id="overlay-restart">立即重启</button>
+    </div>
+    <p class="tip">设置即时写入后端并持久化，悬浮窗实时生效。</p>
+    <p class="tip">
+      关闭「鼠标穿透」后可直接<b>拖动悬浮文字</b>调整位置，松手自动保存（位置变为「自定义」）。
+    </p>
+    <p class="tip">
+      开启「鼠标穿透」后悬浮窗不接收鼠标点击，<b>点击桌面托盘里的悬浮歌词图标即可关闭</b>；
+      也可关闭穿透，再在悬浮文字上右键 → 退出。
+    </p>
+    <p class="tip">当前歌词为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。</p>
+    <p class="tip">
+      改动显示设置后若悬浮窗没有及时更新，可点上方「立即重启」重新加载；
+      <b>完全退出并重启 MoeKoe</b> 也能达到同样效果。
+    </p>
+  </section>
+
+  <section>
+    <h2>传输预览</h2>
+    <div class="preview" id="preview">
+      <p class="muted">等待歌词数据…</p>
+    </div>
+  </section>
+
+  <footer>
+    <button type="button" id="reconnect">重新连接</button>
+    <button type="button" id="sync" class="primary">立即同步</button>
+    <button type="button" id="refresh">刷新</button>
+  </footer>
+
+  <script src="lyrics-parser.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

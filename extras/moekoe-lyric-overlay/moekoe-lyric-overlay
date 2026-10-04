@@ -1,0 +1,842 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""moekoe-lyric-overlay —— MoeKoe MPRIS 歌词的 Wayland 悬浮显示端。
+
+读取 MoeKoe MPRIS 插件暴露的 org.moekoe.MPRIS.Lyrics 接口
+（CurrentLine 属性 + LineChanged 信号），在 wlr-layer-shell 悬浮层上
+显示当前歌词行。CurrentLine 已由插件按传输模式投影，直接展示即可：
+  单歌词   → 只有 text
+  单翻译   → 只有 translation
+  歌词翻译 → 两者都有
+
+依赖：python-gobject、gtk4、gtk4-layer-shell（见同目录 README）
+"""
+
+import argparse
+import ctypes
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+DEFAULT_BUS_NAME = "org.mpris.MediaPlayer2.MoeKoeMusic"
+OBJECT_PATH = "/org/mpris/MediaPlayer2"
+IFACE_LYRICS = "org.moekoe.MPRIS.Lyrics"
+IFACE_PLAYER = "org.mpris.MediaPlayer2.Player"
+IFACE_OVERLAY = "org.moekoe.MPRIS.Overlay"
+OVERLAY_BUS_NAME = "org.moekoe.LyricOverlay"
+
+# 悬浮显示配置：插件弹窗是唯一写入口，客户端从这里读。宿主缺失该接口（旧版
+# 或播放器没起）时退回命令行参数默认值。
+POSITIONS = (
+    "top-left", "top-center", "top-right",
+    "bottom-left", "bottom-center", "bottom-right",
+)
+CUSTOM_POSITION = "custom"   # 拖动后的自由位置（PosX/PosY 为像素坐标）
+DEFAULT_POSITION = "bottom-center"
+DEFAULT_OPACITY = 0.62
+DEFAULT_CLICK_THROUGH = True
+DEFAULT_SCALE = 1.0
+SCALE_MIN = 0.5
+SCALE_MAX = 2.0
+
+# 纯音乐占位歌词（网易云/KRC 常用）——歌词是这个值时悬浮窗不显示
+INSTRUMENTAL_MARKERS = ("纯音乐，请欣赏", "纯音乐，请欣赏。", "纯音乐，请欣赏！")
+
+# StatusNotifierItem 托盘（桌面 shell 提供托盘时可见，用于退出）
+SNI_IFACE = "org.kde.StatusNotifierItem"
+SNI_MENU_IFACE = "com.canonical.dbusmenu"
+SNI_WATCHER_NAME = "org.kde.StatusNotifierWatcher"
+SNI_WATCHER_PATH = "/StatusNotifierWatcher"
+SNI_OBJECT_PATH = "/StatusNotifierItem"
+
+# 托盘走 dbus-python（与宿主同款、可靠）；缺依赖时只是没有托盘图标
+try:
+    import dbus
+    import dbus.service
+    _HAVE_DBUS_PYTHON = True
+except ImportError:  # pragma: no cover - 环境相关
+    dbus = None
+    _HAVE_DBUS_PYTHON = False
+
+SYSTEM_TYPELIB = Path("/usr/lib/girepository-1.0/Gtk4LayerShell-1.0.typelib")
+LOCAL_LAYER_DIR = Path.home() / ".local/lib/moekoe-layer-shell"
+
+
+if _HAVE_DBUS_PYTHON:
+    class TrayItem(dbus.service.Object):
+        """SNI 托盘图标 + dbusmenu：桌面 shell 托盘里显示，用于退出悬浮窗。
+
+        鼠标穿透开启时悬浮窗收不到点击，托盘就是唯一的退出入口：
+        左键单击图标直接关闭，右键弹出「退出」菜单。
+        """
+
+        def __init__(self, bus_name, path, on_quit):
+            super().__init__(bus_name, path)
+            self._on_quit = on_quit
+
+        def _props(self):
+            return dbus.Dictionary(
+                {
+                    "Category": dbus.String("ApplicationStatus"),
+                    "Id": dbus.String("moekoe-lyric-overlay"),
+                    "Title": dbus.String("Moekoe 歌词"),
+                    "Status": dbus.String("Active"),
+                    # ItemIsMenu=False：左键直接触发 Activate（关闭悬浮窗），
+                    # 右键才弹出下面 GetLayout 的「退出」菜单。
+                    "ItemIsMenu": dbus.Boolean(False),
+                    "IconName": dbus.String("media-playback-pause"),
+                    "Menu": dbus.ObjectPath(SNI_OBJECT_PATH),
+                    # 悬停提示：告诉用户点一下图标即可关闭
+                    "ToolTip": dbus.Struct(
+                        (
+                            dbus.String("media-playback-pause"),
+                            dbus.Array([], signature="(iiay)"),
+                            dbus.String("Moekoe 歌词"),
+                            dbus.String("点击关闭悬浮歌词"),
+                        ),
+                        signature="sa(iiay)ss",
+                    ),
+                },
+                signature="sv",
+            )
+
+        @dbus.service.method(SNI_IFACE, in_signature="ii", out_signature="")
+        def Activate(self, x, y):
+            # 左键单击托盘图标 → 直接关闭（退出）悬浮窗
+            self._on_quit()
+
+        @dbus.service.method(SNI_IFACE, in_signature="ii", out_signature="")
+        def ContextMenu(self, x, y):
+            pass
+
+        @dbus.service.method(SNI_IFACE, in_signature="ii", out_signature="")
+        def SecondaryActivate(self, x, y):
+            pass
+
+        @dbus.service.method(SNI_MENU_IFACE, in_signature="iias",
+                             out_signature="ua(ia{sv}av)")
+        def GetLayout(self, parent_id, depth, names):
+            item = (
+                dbus.Int32(1),
+                dbus.Dictionary(
+                    {"label": dbus.String("退出"), "enabled": dbus.Boolean(True)},
+                    signature="sv"),
+                dbus.Array([], signature="v"),
+            )
+            return (dbus.UInt32(0), dbus.Array([item], signature="(ia{sv}av)"))
+
+        @dbus.service.method(SNI_MENU_IFACE, in_signature="isvu", out_signature="")
+        def Event(self, item_id, event_id, data, timestamp):
+            if str(event_id) == "clicked" and int(item_id) == 1:
+                self._on_quit()
+
+        @dbus.service.method(SNI_MENU_IFACE, in_signature="i", out_signature="b")
+        def AboutToShow(self, item_id):
+            return True
+
+        @dbus.service.method("org.freedesktop.DBus.Properties",
+                             in_signature="ss", out_signature="v")
+        def Get(self, interface, prop):
+            table = self._props()
+            if prop not in table:
+                raise dbus.exceptions.DBusException(
+                    "未知属性: %s" % prop,
+                    name="org.freedesktop.DBus.Error.UnknownProperty")
+            return table[prop]
+
+        @dbus.service.method("org.freedesktop.DBus.Properties",
+                             in_signature="s", out_signature="a{sv}")
+        def GetAll(self, interface):
+            return self._props()
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="moekoe-lyric-overlay",
+        description="MoeKoe MPRIS 歌词的 Wayland 悬浮显示端",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--bus-name", default=DEFAULT_BUS_NAME, help="MPRIS 播放器总线名")
+    parser.add_argument("--anchor", choices=("bottom", "top"), default="bottom", help="悬浮位置")
+    parser.add_argument("--margin", type=int, default=64, help="距屏幕边缘的距离（像素）")
+    parser.add_argument("--font-size", type=int, default=28, help="原文字号（pt）")
+    parser.add_argument("--layer", choices=("overlay", "top"), default="overlay",
+                        help="layer-shell 层级（overlay 压在一切窗口之上）")
+    parser.add_argument("--show-track", action="store_true", help="歌词上方显示曲目名")
+    parser.add_argument("--no-click-through", action="store_false", dest="click_through",
+                        help="关闭鼠标穿透（点击穿透到底层窗口，默认开）")
+    parser.add_argument("--dump", action="store_true",
+                        help="不创建窗口，把收到的歌词行打印到终端（调试）")
+    return parser.parse_args()
+
+
+def prepare_layer_shell():
+    """系统未装 gtk4-layer-shell 时，回退到用户级安装目录。"""
+    if SYSTEM_TYPELIB.exists() or not LOCAL_LAYER_DIR.exists():
+        return
+    typelib_dir = LOCAL_LAYER_DIR / "typelib"
+    if not (typelib_dir / "Gtk4LayerShell-1.0.typelib").exists():
+        return
+    os.environ.setdefault("GI_TYPELIB_PATH", str(typelib_dir))
+    # typelib 里的动态库按 SONAME 走 dlopen，先预加载让它命中已加载模块
+    for name in ("libgtk4-layer-shell.so.0", "libgtk4-layer-shell.so.1"):
+        candidate = LOCAL_LAYER_DIR / name
+        if candidate.exists():
+            ctypes.CDLL(str(candidate.resolve()), mode=ctypes.RTLD_GLOBAL)
+            break
+
+
+def deep_unpack(value, GLib):
+    """把 GLib.Variant 一路解包到普通 Python 值。"""
+    while isinstance(value, GLib.Variant):
+        value = value.unpack()
+    return value
+
+
+def to_line(value, GLib):
+    """把 a{sv} 歌词行转成普通 dict（兼容 unpack 深度不同的 PyGObject 版本）。"""
+    raw = deep_unpack(value, GLib)
+    if not isinstance(raw, dict):
+        return {}
+    return {k: deep_unpack(v, GLib) for k, v in raw.items()}
+
+
+class Overlay:
+    def __init__(self, args, loop, use_ui):
+        from gi.repository import Gio, GLib
+
+        self.args = args
+        self.loop = loop
+        self.use_ui = use_ui
+        self.line = None
+        self.mode = ""
+        self.playback = "Stopped"
+        self.track_text = ""
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        # 显示配置：默认取命令行参数，连上宿主后以 org.moekoe.MPRIS.Overlay 为准
+        self.enabled = True
+        self.opacity = DEFAULT_OPACITY
+        self.position = (
+            "%s-center" % args.anchor if args.anchor in ("top", "bottom") else DEFAULT_POSITION)
+        self.click_through = args.click_through
+        self.scale = DEFAULT_SCALE
+        self.pos_x = 0          # position == "custom" 时的左上角像素坐标
+        self.pos_y = 0
+        self._drag_origin = None  # 拖动开始时窗口的绝对左上角
+        self.css_provider = None
+        self.window = None
+        self.tray = None
+        self.tray_name = None
+
+        # 单实例：重复启动时直接退出
+        # （g_dbus_connection_request_name 不在 GIR 里，直接调 RequestName）
+        try:
+            result = self.bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "RequestName",
+                GLib.Variant("(su)", (OVERLAY_BUS_NAME, 0)),
+                GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, 3000, None)
+            # 1 = DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER
+            if result.unpack()[0] != 1:
+                print("已有另一个悬浮歌词实例在运行", file=sys.stderr)
+                raise SystemExit(1)
+        except GLib.Error as exc:
+            print(f"提示: 申请 {OVERLAY_BUS_NAME} 失败: {exc}", file=sys.stderr)
+
+        # 先订阅再拉全量：期间的信号会随后入队，最终状态不丢
+        # 歌词单订阅：只听 LineChanged。PropertiesChanged 是发给通用工具的
+        # 属性广播，两边都听就必须按值去重；事件侧由发送端 emit_line 保证
+        # 每次变化恰好一条，单订阅下不存在重复投递。
+        self.bus.signal_subscribe(
+            args.bus_name, IFACE_LYRICS, "LineChanged",
+            OBJECT_PATH, None, Gio.DBusSignalFlags.NONE, self._on_line_changed, None)
+        if use_ui:
+            # Player 属性（PlaybackStatus/Metadata）与歌词行是不同数据，照常订阅
+            self.bus.signal_subscribe(
+                args.bus_name, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                OBJECT_PATH, IFACE_PLAYER, Gio.DBusSignalFlags.NONE, self._on_player_props, None)
+            # 显示配置（开关/透明度/位置/穿透）变更 → 实时应用
+            self.bus.signal_subscribe(
+                args.bus_name, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                OBJECT_PATH, IFACE_OVERLAY, Gio.DBusSignalFlags.NONE, self._on_overlay_props, None)
+        self.bus.signal_subscribe(
+            None, "org.freedesktop.DBus", "NameOwnerChanged",
+            "/org/freedesktop/DBus", args.bus_name, Gio.DBusSignalFlags.NONE,
+            self._on_name_owner, None)
+
+        if use_ui:
+            # 窗口创建前先拿宿主配置（旧版宿主/未起时用命令行默认值）
+            self.fetch_overlay_config()
+            self._build_ui()
+            self._start_sni()  # 托盘图标（桌面 shell 提供托盘时可见）
+
+        self.fetch_initial()
+        self.render()
+
+    # ---------------- D-Bus 读取 ----------------
+
+    def _get_all(self, iface):
+        from gi.repository import Gio, GLib
+
+        result = self.bus.call_sync(
+            self.args.bus_name, OBJECT_PATH, "org.freedesktop.DBus.Properties",
+            "GetAll", GLib.Variant("(s)", (iface,)),
+            GLib.VariantType("(a{sv})"), Gio.DBusCallFlags.NONE, 3000, None)
+        return {k: deep_unpack(v, GLib) for k, v in result.unpack()[0].items()}
+
+    def fetch_initial(self):
+        from gi.repository import GLib
+
+        try:
+            lyrics = self._get_all(IFACE_LYRICS)
+        except GLib.Error:
+            return  # 播放器还没起，等 NameOwnerChanged
+        self.mode = str(lyrics.get("Mode") or "")
+        self.line = lyrics.get("CurrentLine") or None
+        if self.use_ui:  # PlaybackStatus 总要（--show-track 关掉时也要判停）
+            try:
+                player = self._get_all(IFACE_PLAYER)
+            except GLib.Error:
+                player = {}
+            self.playback = str(player.get("PlaybackStatus") or "Stopped")
+            if "Metadata" in player:
+                self._apply_metadata(player["Metadata"])
+
+    # ---------------- D-Bus 信号 ----------------
+
+    def _on_line_changed(self, _bus, _sender, _path, _iface, _signal, params, _user):
+        from gi.repository import GLib
+
+        self.line = to_line(params.unpack()[0], GLib)
+        if "mode" in self.line:
+            self.mode = str(self.line["mode"])
+        self.render()
+
+    def _on_player_props(self, _bus, _sender, _path, _iface, _signal, params, _user):
+        from gi.repository import GLib
+
+        _iface_name, changed, _invalidated = params.unpack()
+        dirty = False
+        if "Metadata" in changed:
+            self._apply_metadata(changed["Metadata"])
+            dirty = True
+        if "PlaybackStatus" in changed:
+            self.playback = str(deep_unpack(changed["PlaybackStatus"], GLib))
+            dirty = True
+        if dirty:
+            self.render()
+
+    def _on_name_owner(self, _bus, _sender, _path, _iface, _signal, params, _user):
+        _name, _old_owner, new_owner = params.unpack()
+        if not new_owner:
+            self.line = None
+            self.render()
+        elif not _old_owner:
+            self.fetch_overlay_config()  # 宿主(重)启动 → 重新读显示配置
+            self.fetch_initial()
+            self.render()
+
+    def _apply_metadata(self, variant):
+        from gi.repository import GLib
+
+        meta = deep_unpack(variant, GLib)
+        if not isinstance(meta, dict):
+            return
+        meta = {k: deep_unpack(v, GLib) for k, v in meta.items()}
+        title = str(meta.get("xesam:title") or "")
+        artists = meta.get("xesam:artist") or []
+        if isinstance(artists, str):
+            artists = [artists]
+        names = [str(a) for a in artists if str(a)]
+        if title and names:
+            self.track_text = " - ".join([title] + names)
+        else:
+            self.track_text = title or ", ".join(names)
+
+    # ---------------- 显示配置（org.moekoe.MPRIS.Overlay） ----------------
+
+    def fetch_overlay_config(self):
+        from gi.repository import GLib
+
+        try:
+            cfg = self._get_all(IFACE_OVERLAY)
+        except GLib.Error:
+            return  # 旧版宿主没有 Overlay 接口，或播放器还没起
+        self._update_config(cfg)
+
+    def _update_config(self, cfg):
+        from gi.repository import GLib
+
+        dirty_css = dirty_pos = dirty_vis = dirty_click = False
+        if "Opacity" in cfg:
+            try:
+                value = min(max(float(deep_unpack(cfg["Opacity"], GLib)), 0.0), 1.0)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and abs(value - self.opacity) > 1e-9:
+                self.opacity = value
+                dirty_css = True
+        if "Position" in cfg:
+            position = str(deep_unpack(cfg["Position"], GLib))
+            if (position in POSITIONS or position == CUSTOM_POSITION) and position != self.position:
+                self.position = position
+                dirty_pos = True
+        if "PosX" in cfg:
+            try:
+                x = int(deep_unpack(cfg["PosX"], GLib))
+            except (TypeError, ValueError):
+                x = None
+            if x is not None and x != self.pos_x:
+                self.pos_x = x
+                dirty_pos = True
+        if "PosY" in cfg:
+            try:
+                y = int(deep_unpack(cfg["PosY"], GLib))
+            except (TypeError, ValueError):
+                y = None
+            if y is not None and y != self.pos_y:
+                self.pos_y = y
+                dirty_pos = True
+        if "Scale" in cfg:
+            try:
+                scale = min(max(float(deep_unpack(cfg["Scale"], GLib)), SCALE_MIN), SCALE_MAX)
+            except (TypeError, ValueError):
+                scale = None
+            if scale is not None and abs(scale - self.scale) > 1e-9:
+                self.scale = scale
+                dirty_css = True
+        if "Enabled" in cfg:
+            enabled = bool(deep_unpack(cfg["Enabled"], GLib))
+            if enabled != self.enabled:
+                self.enabled = enabled
+                dirty_vis = True
+        if "ClickThrough" in cfg:
+            click = bool(deep_unpack(cfg["ClickThrough"], GLib))
+            if click != self.click_through:
+                self.click_through = click
+                dirty_click = True
+        if dirty_css and self.css_provider is not None:
+            self._reload_css()
+        if (dirty_css or dirty_pos) and self.window is not None:
+            self._apply_position()
+        if dirty_click and self.window is not None:
+            self._apply_input_region()
+        if dirty_vis and self.window is not None:
+            self.render()
+
+    def _on_overlay_props(self, _bus, _sender, _path, _iface, _signal, params, _user):
+        from gi.repository import GLib
+
+        _iface_name, changed, _invalidated = params.unpack()
+        if not changed:
+            return
+        self._update_config({k: deep_unpack(v, GLib) for k, v in changed.items()})
+
+    # ---------------- 渲染 ----------------
+
+    def render(self):
+        if not self.use_ui:
+            self._dump_line()
+            return
+
+        line = self.line or {}
+        text = str(line.get("text") or "")
+        translation = str(line.get("translation") or "")
+        # 单翻译模式：译文走主行样式（与单歌词模式完全一致，都是大字加粗）
+        if text:
+            primary, secondary = text, translation
+        else:
+            primary, secondary = translation, ""
+        # 纯音乐占位 → 不显示弹窗；开关关闭 → 不显示
+        suppressed = primary in INSTRUMENTAL_MARKERS or translation in INSTRUMENTAL_MARKERS
+        visible = (bool(primary) and not suppressed
+                   and self.playback != "Stopped" and self.enabled)
+        if visible:
+            self.label_orig.set_text(primary)
+            self.label_orig.set_visible(True)
+            self.label_trans.set_text(secondary)
+            self.label_trans.set_visible(bool(secondary))
+            if self.args.show_track:
+                self.label_track.set_text(self.track_text)
+                self.label_track.set_visible(bool(self.track_text))
+        self.window.set_visible(visible)
+
+    def _dump_line(self):
+        line = self.line or {}
+        text = str(line.get("text") or "")
+        translation = str(line.get("translation") or "")
+        body = " | ".join(p for p in (text, translation) if p) or "(无当前行)"
+        index = line.get("index", -1)
+        print(f"[{time.strftime('%H:%M:%S')}] #{index} mode={self.mode or '?'} {body}",
+              flush=True)
+
+    # ---------------- UI ----------------
+
+    def _build_ui(self):
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Gdk", "4.0")
+        from gi.repository import Gdk, Gtk, Gtk4LayerShell
+
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            sys.exit("错误：需要 Wayland 会话（本程序基于 wlr-layer-shell），"
+                     "未检测到 WAYLAND_DISPLAY")
+        if not Gtk.is_initialized():
+            Gtk.init()
+
+        args = self.args
+        provider = Gtk.CssProvider()
+        self.css_provider = provider
+        self._reload_css()
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        window = Gtk.Window(title="Moekoe Lyrics")
+        window.set_decorated(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.add_css_class("pill")
+
+        self.label_track = Gtk.Label(halign=Gtk.Align.CENTER)
+        self.label_track.add_css_class("track")
+        self.label_orig = Gtk.Label(halign=Gtk.Align.CENTER)
+        self.label_orig.add_css_class("orig")
+        self.label_trans = Gtk.Label(halign=Gtk.Align.CENTER)
+        self.label_trans.add_css_class("trans")
+        if args.show_track:
+            box.append(self.label_track)
+        box.append(self.label_orig)
+        box.append(self.label_trans)
+        window.set_child(box)
+
+        # 层/键盘模式：窗口未建好时先设好；锚定与穿透在 _apply_position 里
+        Gtk4LayerShell.init_for_window(window)
+        Gtk4LayerShell.set_layer(
+            window,
+            Gtk4LayerShell.Layer.OVERLAY if args.layer == "overlay"
+            else Gtk4LayerShell.Layer.TOP)
+        Gtk4LayerShell.set_exclusive_zone(window, -1)  # 不给面板留位，纯覆盖
+        try:
+            Gtk4LayerShell.set_keyboard_mode(window, Gtk4LayerShell.KeyboardMode.NONE)
+        except (AttributeError, TypeError):
+            try:
+                Gtk4LayerShell.set_keyboard_interactivity(window, False)
+            except Exception:  # noqa: BLE001 旧版本参数不同，忽略
+                pass
+
+        # 右键菜单：退出
+        popover = Gtk.Popover()
+        popover.set_parent(window)
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        menu.set_margin_top(8)
+        menu.set_margin_bottom(8)
+        menu.set_margin_start(10)
+        menu.set_margin_end(10)
+        menu.append(Gtk.Label(label="Moekoe 歌词"))
+        quit_button = Gtk.Button(label="退出")
+        quit_button.connect("clicked", lambda *_b: self.quit())
+        menu.append(quit_button)
+        popover.set_child(menu)
+
+        gesture = Gtk.GestureClick.new()
+        gesture.set_button(Gdk.BUTTON_SECONDARY)
+
+        def on_press(_gesture, _n_press, x, y):
+            rect = Gdk.Rectangle(x=int(x), y=int(y), width=1, height=1)
+            popover.set_pointing_to(rect)
+            popover.popup()
+
+        gesture.connect("pressed", on_press)
+        window.add_controller(gesture)
+
+        # 拖动改位置：鼠标穿透关闭时窗口才收得到事件，拖动即切到自由位置，
+        # 松手回写宿主持久化（穿透开启时输入区域为空，自然收不到拖动）。
+        drag = Gtk.GestureDrag.new()
+
+        def on_drag_begin(_gesture, _start_x, _start_y):
+            self._drag_origin = self._current_absolute_position()
+
+        def on_drag_update(_gesture, offset_x, offset_y):
+            if self._drag_origin is None:
+                return
+            self.position = CUSTOM_POSITION
+            self.pos_x, self.pos_y = self._clamp_position(
+                self._drag_origin[0] + offset_x, self._drag_origin[1] + offset_y)
+            self._apply_position()
+
+        def on_drag_end(_gesture, _offset_x, _offset_y):
+            if self._drag_origin is None:
+                return
+            self._drag_origin = None
+            self._save_position()
+
+        drag.connect("drag-begin", on_drag_begin)
+        drag.connect("drag-update", on_drag_update)
+        drag.connect("drag-end", on_drag_end)
+        window.add_controller(drag)
+
+        self.window = window
+        # 窗口 realize/map 之后才有 GdkSurface，穿透要等那时再设一次
+        window.connect("map", lambda *_a: self._apply_input_region())
+        self._apply_position()
+
+    # ---------------- 样式 / 锚定 / 穿透 ----------------
+
+    def _build_css(self):
+        args = self.args
+        alpha = min(max(float(self.opacity), 0.0), 1.0)
+        scale = min(max(float(self.scale), SCALE_MIN), SCALE_MAX)
+        font = max(6, int(round(args.font_size * scale)))
+        radius = max(4, int(round(16 * scale)))
+        pad_v = max(2, int(round(12 * scale)))
+        pad_h = max(4, int(round(26 * scale)))
+        return (
+            "window { background: transparent; }"
+            ".pill { background-color: rgba(10,10,14,%.3f); border-radius: %dpx;"
+            " padding: %dpx %dpx; }"
+            ".orig { color: #ffffff; font-weight: bold; font-size: %dpt; }"
+            ".trans { color: rgba(255,255,255,0.85); font-size: %dpt; margin-top: 3px; }"
+            ".track { color: rgba(255,255,255,0.55); font-size: %dpt; margin-bottom: 5px; }"
+        ) % (
+            alpha, radius, pad_v, pad_h,
+            font,
+            max(8, int(round(font * 0.72))),
+            max(7, int(round(font * 0.48))),
+        )
+
+    def _reload_css(self):
+        if self.css_provider is None:
+            return
+        css = self._build_css()
+        try:
+            self.css_provider.load_from_data(css.encode("utf-8"))
+        except TypeError:
+            self.css_provider.load_from_data(css)
+
+    def _apply_position(self):
+        """按 position 设置锚定与边距，并应用鼠标穿透。
+
+        layer-shell 只锚定一条竖直边时，水平方向按规范自然居中；水平边锚定时
+        贴边并按 margin 内缩。position == "custom"（拖动过）时改为左上角锚定，
+        用 PosX/PosY 作为相对当前输出的像素坐标。
+        """
+        from gi.repository import Gtk4LayerShell
+
+        win = self.window
+        if win is None:
+            return
+
+        if self.position == CUSTOM_POSITION:
+            top = Gtk4LayerShell.Edge.TOP
+            bottom = Gtk4LayerShell.Edge.BOTTOM
+            left = Gtk4LayerShell.Edge.LEFT
+            right = Gtk4LayerShell.Edge.RIGHT
+            Gtk4LayerShell.set_anchor(win, top, True)
+            Gtk4LayerShell.set_anchor(win, bottom, False)
+            Gtk4LayerShell.set_anchor(win, left, True)
+            Gtk4LayerShell.set_anchor(win, right, False)
+            Gtk4LayerShell.set_margin(win, top, max(0, int(self.pos_y)))
+            Gtk4LayerShell.set_margin(win, bottom, 0)
+            Gtk4LayerShell.set_margin(win, left, max(0, int(self.pos_x)))
+            Gtk4LayerShell.set_margin(win, right, 0)
+            self._apply_input_region()
+            return
+
+        position = self.position if self.position in POSITIONS else DEFAULT_POSITION
+        vertical, _, horizontal = position.partition("-")
+        edge = (Gtk4LayerShell.Edge.TOP if vertical == "top"
+                else Gtk4LayerShell.Edge.BOTTOM)
+        opposite = (Gtk4LayerShell.Edge.BOTTOM if edge == Gtk4LayerShell.Edge.TOP
+                    else Gtk4LayerShell.Edge.TOP)
+        left, right = Gtk4LayerShell.Edge.LEFT, Gtk4LayerShell.Edge.RIGHT
+
+        # 竖直：只锚定所选边，另一侧松开
+        Gtk4LayerShell.set_anchor(win, edge, True)
+        Gtk4LayerShell.set_anchor(win, opposite, False)
+        Gtk4LayerShell.set_margin(win, edge, self.args.margin)
+        Gtk4LayerShell.set_margin(win, opposite, 0)
+        # 水平：center = 两边都松开（自然居中）；left/right = 贴对应边
+        Gtk4LayerShell.set_anchor(win, left, horizontal == "left")
+        Gtk4LayerShell.set_anchor(win, right, horizontal == "right")
+        Gtk4LayerShell.set_margin(
+            win, left, self.args.margin if horizontal == "left" else 0)
+        Gtk4LayerShell.set_margin(
+            win, right, self.args.margin if horizontal == "right" else 0)
+
+        self._apply_input_region()
+
+    def _output_size(self):
+        """当前输出（显示器）的宽高，用于把预设位置换算成绝对坐标。"""
+        fallback = (1920, 1080)
+        win = self.window
+        if win is None:
+            return fallback
+        try:
+            display = win.get_display()
+            surface = win.get_surface()
+            monitor = None
+            if surface is not None:
+                monitor = display.get_monitor_at_surface(surface)
+            if monitor is None:
+                monitor = display.get_primary_monitor() or display.get_monitor(0)
+            if monitor is None:
+                return fallback
+            geom = monitor.get_geometry()
+            return (max(1, int(geom.width)), max(1, int(geom.height)))
+        except Exception:  # noqa: BLE001 - 拿不到就退回常见分辨率
+            return fallback
+
+    def _clamp_position(self, x, y):
+        """把自由坐标限制在当前输出内，避免拖出屏幕后找不回来。"""
+        win = self.window
+        mw, mh = self._output_size()
+        ww = max(1, win.get_width()) if win is not None else 1
+        wh = max(1, win.get_height()) if win is not None else 1
+        x = max(0, min(int(round(x)), max(0, mw - ww)))
+        y = max(0, min(int(round(y)), max(0, mh - wh)))
+        return (x, y)
+
+    def _current_absolute_position(self):
+        """拖动开始时窗口左上角的绝对坐标：custom 用存值，预设按锚定换算。"""
+        win = self.window
+        if win is None:
+            return (0, 0)
+        if self.position == CUSTOM_POSITION:
+            return (int(self.pos_x), int(self.pos_y))
+        position = self.position if self.position in POSITIONS else DEFAULT_POSITION
+        vertical, _, horizontal = position.partition("-")
+        mw, mh = self._output_size()
+        ww = max(1, win.get_width())
+        wh = max(1, win.get_height())
+        margin = int(self.args.margin)
+        if horizontal == "left":
+            x = margin
+        elif horizontal == "right":
+            x = mw - margin - ww
+        else:
+            x = (mw - ww) // 2
+        if vertical == "top":
+            y = margin
+        else:
+            y = mh - margin - wh
+        return self._clamp_position(x, y)
+
+    def _save_position(self):
+        """拖动结束把自由坐标回写宿主（宿主是配置权威，负责持久化）。"""
+        from gi.repository import Gio, GLib
+
+        try:
+            self.bus.call_sync(
+                self.args.bus_name, OBJECT_PATH, IFACE_OVERLAY, "SavePosition",
+                GLib.Variant("(ii)", (int(self.pos_x), int(self.pos_y))),
+                None, Gio.DBusCallFlags.NONE, 2000, None)
+        except Exception:  # noqa: BLE001 - 旧版宿主没有该方法，拖动仍本地生效
+            pass
+
+    def _apply_input_region(self):
+        """鼠标穿透：把窗口输入区域设为空 → 点击直接落到下层窗口。
+
+        走 GdkSurface.set_input_region（gtk4-layer-shell 不一定导出该函数）。
+        窗口还没 realize 时先跳过，等 map 信号再设。
+        """
+        win = self.window
+        if win is None:
+            return
+        surface = win.get_surface()
+        if surface is None:
+            return
+        try:
+            import cairo
+        except ImportError:  # pragma: no cover - pycairo 一般随 GTK 安装
+            return
+        try:
+            if self.click_through:
+                surface.set_input_region(cairo.Region())  # 空区域 → 不接收输入
+            else:
+                surface.set_input_region(None)  # 恢复默认（整窗接收）
+        except (AttributeError, TypeError):
+            pass  # 旧版 GTK 没有该 API，忽略
+
+    # ---------------- StatusNotifierItem 托盘（退出入口） ----------------
+
+    def _start_sni(self):
+        """在会话总线上注册 SNI 托盘图标 + 退出菜单（缺依赖/无 watcher 时静默跳过）。"""
+        if not _HAVE_DBUS_PYTHON:
+            self.tray = None
+            return
+        try:
+            from dbus.mainloop.glib import DBusGMainLoop
+
+            DBusGMainLoop(set_as_default=True)
+        except Exception:  # noqa: BLE001 dbus-python 与 GLib 的桥接，失败就退化成无托盘
+            self.tray = None
+            return
+        try:
+            bus = dbus.SessionBus()
+            name = "org.kde.StatusNotifierItem-%d-%d" % (
+                os.getpid(), int(time.time() * 100))
+            bus_name = dbus.service.BusName(name, bus)
+            self.tray = TrayItem(bus_name, SNI_OBJECT_PATH, self.quit)
+            self.tray_name = name
+            try:
+                watcher = bus.get_object(SNI_WATCHER_NAME, SNI_WATCHER_PATH)
+                watcher.RegisterStatusNotifierItem(
+                    name, dbus_interface=SNI_WATCHER_NAME)
+            except dbus.exceptions.DBusException:
+                pass  # 没有托盘主机也没关系
+        except Exception:  # noqa: BLE001 托盘是锦上添花，起不来不影响悬浮窗
+            self.tray = None
+
+    # ---------------- 生命周期 ----------------
+
+    def quit(self):
+        from gi.repository import GLib
+
+        GLib.idle_add(lambda: (self.loop.quit(), False)[1])
+
+
+def main():
+    args = parse_args()
+    prepare_layer_shell()
+
+    import gi
+    from gi.repository import Gio, GLib
+
+    use_ui = not args.dump
+    if use_ui:
+        try:
+            gi.require_version("Gtk4LayerShell", "1.0")
+        except ValueError:
+            sys.exit(
+                "错误：未找到 gtk4-layer-shell。\n"
+                "  推荐安装： sudo pacman -S gtk4-layer-shell\n"
+                "  免 root 安装方法见 extras/moekoe-lyric-overlay/README.md")
+        # Gtk/Gdk/Gtk4LayerShell 的导入在 _build_ui 里完成
+
+    loop = GLib.MainLoop()
+    if args.dump:
+        print(f"监听 {args.bus_name} 的歌词信号（Ctrl+C 退出）", flush=True)
+    app = Overlay(args, loop, use_ui)
+
+    def on_sigint():
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    try:
+        from gi.repository import GLibUnix
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, on_sigint)
+    except (ImportError, AttributeError, TypeError):
+        try:
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, on_sigint)
+        except (AttributeError, TypeError):
+            signal.signal(signal.SIGINT,
+                          lambda *_s: GLib.idle_add(lambda: (loop.quit(), False)[1]))
+
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "MoeKoe MPRIS (Linux)",
+  "plugin_id": "moekoe-mpris",
+  "version": "1.0.0",
+  "minversion": "1.6.6",
+  "moekoe": true,
+  "author": {
+    "name": "chen-shuhan",
+    "url": "https://github.com/MoeKoeMusic/MoeKoeMusic"
+  },
+  "description": "在 Linux 上为 MoeKoe Music 注册 MPRIS2 D-Bus 播放器接口（org.mpris.MediaPlayer2.MoeKoeMusic），把当前曲目与播放状态暴露给桌面组件，并通过 Metadata 自定义键与独立 D-Bus 信号传输歌词，支持单歌词、单翻译、歌词+翻译三种传输模式。",
+  "permissions": [
+    "storage"
+  ],
+  "moekoe_permissions": [
+    "moekoe:nativeHost"
+  ],
+  "moekoe_native_hosts": [
+    {
+      "id": "mpris-host",
+      "auto_start": true,
+      "bridge": "native-bridge.html",
+      "platforms": {
+        "linux": {
+          "path": "bin/mpris-host",
+          "args": []
+        }
+      }
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
