@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 NAME = os.path.basename(ROOT)
 
-EXCLUDE_DIRS = {"tests", "scripts", "dist", "assets", "__pycache__", ".git"}
+EXCLUDE_DIRS = {"tests", "scripts", "dist", "assets", "__pycache__", ".git", ".github"}
 EXCLUDE_FILES = {".gitignore"}
 
 

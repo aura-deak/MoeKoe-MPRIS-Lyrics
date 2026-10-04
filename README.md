@@ -8,6 +8,102 @@
 `org.mpris.MediaPlayer2.MoeKoeMusic`，把当前曲目、播放状态暴露给桌面组件，
 并通过 **Metadata 自定义键 + 独立 D-Bus 信号** 传输歌词。
 
+## 安装
+
+### 依赖
+
+1. MoeKoe Music **≥ 1.6.6**（`moekoe:nativeHost` 要求）
+2. Python 3 与 D-Bus 绑定：
+
+```bash
+# Debian / Ubuntu
+sudo apt install python3-dbus python3-gi
+# Fedora
+sudo dnf install python3-dbus python3-gobject
+# Arch
+sudo pacman -S python-dbus python-gobject
+```
+
+3. MoeKoe 设置 → 开启 **API 模式**（插件通过 `ws://127.0.0.1:6520` 取数据）
+
+
+### zip 安装
+
+先[点击下载最新版本的install.zip](https://github.com/aura-deak/MoeKoe-MPRIS-Lyrics/releases/latest/download/install.zip)
+在 **设置 → 插件 → 安装插件** 里选择该 zip
+
+> ⚠️ MoeKoe 解压 zip 时不保留文件权限，`bin/mpris-host` 会丢失可执行位。
+> 安装后请打开插件弹窗，按提示执行（弹窗会给出确切路径）：
+>
+> ```bash
+> chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host
+> ```
+
+### 启用
+
+1. **设置 → 插件** 启用 `MoeKoe MPRIS (Linux)`
+2. 在插件管理页 **授权本地程序**（`mpris-host`）
+3. 播放任意歌曲，打开弹窗确认
+
+---
+
+## 插件弹窗
+
+- **连接状态**：D-Bus 注册状态、MoeKoe API 连接状态、当前曲目与进度
+- **歌词传输模式**：单歌词 / 单翻译 / 歌词翻译 一键切换（写入
+  `~/.config/moekoe-mpris/config.json`，由宿主统一持久化）
+- **悬浮歌词显示**：总开关、鼠标穿透、背景透明度、显示位置（含拖动后的
+  「自定义」）、整体缩放、立即重启悬浮歌词
+- **传输预览**：按当前模式展示即将上总线的当前行
+- **立即同步 / 重新连接 / 刷新**：强制重推数据、重连 API、拉取一次合并状态
+
+弹窗不做后台轮询：打开时拉一次合并状态，之后点「刷新」按需更新；所有设置
+直连宿主（`electronAPI.nativeHost`），宿主是唯一真相源，控件以后端回执回填。
+
+---
+
+## 配套悬浮歌词客户端
+
+`extras/moekoe-lyric-overlay/` 是本插件的 Wayland 悬浮歌词窗口（Python +
+GTK4 + layer-shell，兼容 niri / Hyprland / Sway），直连
+`org.moekoe.MPRIS.Lyrics` 显示 MoeKoe 自己的歌词与翻译，不联网取词：
+
+```bash
+extras/moekoe-lyric-overlay/moekoe-lyric-overlay           # 底部居中悬浮
+extras/moekoe-lyric-overlay/moekoe-lyric-overlay --dump    # 终端逐行打印（调试）
+extras/moekoe-lyric-overlay/moekoe-lyric-overlay --help    # 全部选项
+```
+
+**随 MoeKoe 自动启动**：插件宿主 `bin/mpris-host` 启动时自动拉起悬浮窗
+（MoeKoe 起 → 插件起 → 悬浮窗起；MoeKoe 退出 → 宿主收尾 → 悬浮窗关闭），
+单实例去重，手动启动/调试同样可用。环境变量 `MOEKOE_MPRIS_NO_OVERLAY=1`
+可关闭自动拉起，子进程日志在 `~/.cache/moekoe-mpris/overlay.log`。
+
+**显示设置**（在插件弹窗里改，实时生效并持久化）：总开关、背景透明度、
+六档位置、整体缩放、鼠标穿透。**关闭鼠标穿透后可直接拖动悬浮文字**调整位置，
+松手自动保存（位置变为「自定义」）；选择预设位置则回到贴边/居中。鼠标穿透
+默认开启——此时悬浮窗不接收鼠标，**左键单击桌面托盘里的悬浮歌词图标即可
+关闭悬浮窗**，右键则弹出「退出」菜单；关闭穿透后也可在悬浮文字上右键退出。
+改动设置后若悬浮窗未及时更新，弹窗里的「立即重启悬浮歌词」会重新拉起客户端
+（等价于完全重启 MoeKoe）。当前行为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。
+
+依赖安装与故障排查见 `extras/moekoe-lyric-overlay/README.md`。
+
+---
+
+## 已知限制
+
+1. **曲目信息需要播放一次才会推送**：MoeKoe 只在播放中向 WS API 发送
+   `lyrics` 消息，因此纯暂停状态下首次连接可能暂时看不到元数据。
+2. **暂停期间进度不刷新**：暂停时 MoeKoe 不再推送 `lyrics`，`Position` 以最后一次
+   校正值为准（播放中每 500ms 校正一次）。
+3. **插件只支持 Linux**：其他平台会在弹窗提示 `MPRIS 仅在 Linux 桌面可用`。
+4. **zip 安装需要手动 `chmod +x`**（见上文），弹窗会给出确切命令。
+5. **不开放播放控制**（最小可用设计），控制类方法返回 Not Supported。
+
+---
+
+## 传输模式
 歌词支持三种可切换的传输模式：
 
 | 模式 | 标识 | 传出去的内容 |
@@ -41,7 +137,6 @@
 - TrackList / Playlists 接口
 - Windows / macOS（MPRIS 是 Linux 专属协议）
 
----
 
 ## 架构
 
@@ -179,102 +274,6 @@ playerctl -p MoeKoeMusic metadata --format '{{xesam:title}} - {{moekoe:lyrics}}'
 
 ---
 
-## 配套悬浮歌词客户端
-
-`extras/moekoe-lyric-overlay/` 是本插件的 Wayland 悬浮歌词窗口（Python +
-GTK4 + layer-shell，兼容 niri / Hyprland / Sway），直连
-`org.moekoe.MPRIS.Lyrics` 显示 MoeKoe 自己的歌词与翻译，不联网取词：
-
-```bash
-extras/moekoe-lyric-overlay/moekoe-lyric-overlay           # 底部居中悬浮
-extras/moekoe-lyric-overlay/moekoe-lyric-overlay --dump    # 终端逐行打印（调试）
-extras/moekoe-lyric-overlay/moekoe-lyric-overlay --help    # 全部选项
-```
-
-**随 MoeKoe 自动启动**：插件宿主 `bin/mpris-host` 启动时自动拉起悬浮窗
-（MoeKoe 起 → 插件起 → 悬浮窗起；MoeKoe 退出 → 宿主收尾 → 悬浮窗关闭），
-单实例去重，手动启动/调试同样可用。环境变量 `MOEKOE_MPRIS_NO_OVERLAY=1`
-可关闭自动拉起，子进程日志在 `~/.cache/moekoe-mpris/overlay.log`。
-
-**显示设置**（在插件弹窗里改，实时生效并持久化）：总开关、背景透明度、
-六档位置、整体缩放、鼠标穿透。**关闭鼠标穿透后可直接拖动悬浮文字**调整位置，
-松手自动保存（位置变为「自定义」）；选择预设位置则回到贴边/居中。鼠标穿透
-默认开启——此时悬浮窗不接收鼠标，**左键单击桌面托盘里的悬浮歌词图标即可
-关闭悬浮窗**，右键则弹出「退出」菜单；关闭穿透后也可在悬浮文字上右键退出。
-改动设置后若悬浮窗未及时更新，弹窗里的「立即重启悬浮歌词」会重新拉起客户端
-（等价于完全重启 MoeKoe）。当前行为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。
-
-依赖安装与故障排查见 `extras/moekoe-lyric-overlay/README.md`。
-
----
-
-## 安装
-
-### 依赖
-
-1. MoeKoe Music **≥ 1.6.6**（`moekoe:nativeHost` 要求）
-2. Python 3 与 D-Bus 绑定：
-
-```bash
-# Debian / Ubuntu
-sudo apt install python3-dbus python3-gi
-# Fedora
-sudo dnf install python3-dbus python3-gobject
-# Arch
-sudo pacman -S python-dbus python-gobject
-```
-
-3. MoeKoe 设置 → 开启 **API 模式**（插件通过 `ws://127.0.0.1:6520` 取数据）
-
-### 方式一：手动安装（保留可执行位，推荐）
-
-1. 打开 MoeKoe → **设置 → 插件 → 打开插件目录**
-2. 把整个 `moekoe-mpris/` 目录复制进去
-3. **设置 → 插件 → 刷新插件**
-
-```bash
-# 示例（插件目录以客户端显示的为准）
-cp -r moekoe-mpris ~/.config/moekoemusic/extensions/
-```
-
-### 方式二：zip 安装
-
-```bash
-python3 scripts/pack.py      # 生成 dist/moekoe-mpris-1.0.0.zip
-```
-
-在 **设置 → 插件 → 安装插件** 里选择该 zip（包内已排除测试与开发脚本）。
-
-> ⚠️ MoeKoe 解压 zip 时不保留文件权限，`bin/mpris-host` 会丢失可执行位。
-> 安装后请打开插件弹窗，按提示执行（弹窗会给出确切路径）：
->
-> ```bash
-> chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host
-> ```
-
-### 启用
-
-1. **设置 → 插件** 启用 `MoeKoe MPRIS (Linux)`
-2. 在插件管理页 **授权本地程序**（`mpris-host`）
-3. 播放任意歌曲，打开弹窗确认「D-Bus：已注册 org.mpris.MediaPlayer2.MoeKoeMusic」
-
----
-
-## 插件弹窗
-
-- **连接状态**：D-Bus 注册状态、MoeKoe API 连接状态、当前曲目与进度
-- **歌词传输模式**：单歌词 / 单翻译 / 歌词翻译 一键切换（写入
-  `~/.config/moekoe-mpris/config.json`，由宿主统一持久化）
-- **悬浮歌词显示**：总开关、鼠标穿透、背景透明度、显示位置（含拖动后的
-  「自定义」）、整体缩放、立即重启悬浮歌词
-- **传输预览**：按当前模式展示即将上总线的当前行
-- **立即同步 / 重新连接 / 刷新**：强制重推数据、重连 API、拉取一次合并状态
-
-弹窗不做后台轮询：打开时拉一次合并状态，之后点「刷新」按需更新；所有设置
-直连宿主（`electronAPI.nativeHost`），宿主是唯一真相源，控件以后端回执回填。
-
----
-
 ## 目录结构
 
 ```text
@@ -343,16 +342,6 @@ python3 tests/test_e2e.py          # 端到端：WS 消息 → 桥接页 → 本
 用桩环境替代 Electron 与 MoeKoe WebSocket，因此覆盖了完整链路。
 
 ---
-
-## 已知限制
-
-1. **曲目信息需要播放一次才会推送**：MoeKoe 只在播放中向 WS API 发送
-   `lyrics` 消息，因此纯暂停状态下首次连接可能暂时看不到元数据。
-2. **暂停期间进度不刷新**：暂停时 MoeKoe 不再推送 `lyrics`，`Position` 以最后一次
-   校正值为准（播放中每 500ms 校正一次）。
-3. **插件只支持 Linux**：其他平台会在弹窗提示 `MPRIS 仅在 Linux 桌面可用`。
-4. **zip 安装需要手动 `chmod +x`**（见上文），弹窗会给出确切命令。
-5. **不开放播放控制**（最小可用设计），控制类方法返回 Not Supported。
 
 ## 权限说明（上架审核参考）
 

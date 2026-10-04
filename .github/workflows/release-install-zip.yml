@@ -1,0 +1,53 @@
+name: Release install.zip
+
+# 触发时机：在 GitHub 上发布（publish）一个 Release 时，
+# 自动运行 scripts/pack.py 打包，并把产物作为名为 install.zip 的附件
+# 上传到该 Release。
+# 也可在 Actions 页面手动触发，填目标 Release 的 tag。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 目标 Release 的 tag（手动触发时必填）
+        required: true
+
+# gh release upload 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    # 把仓库 checkout 到名为 moekoe-mpris 的目录，
+    # 这样 pack.py 里 NAME = basename(ROOT) 会得到 moekoe-mpris，
+    # 打出的 zip 顶层目录与本地一致（moekoe-mpris/）。
+    defaults:
+      run:
+        working-directory: moekoe-mpris
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: moekoe-mpris
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 打包（scripts/pack.py）
+        run: |
+          set -euo pipefail
+          python3 scripts/pack.py
+          src="$(ls -1 dist/*.zip | head -n1)"
+          echo "packed: $src"
+          cp "$src" install.zip
+          ls -l install.zip
+
+      - name: 上传 install.zip 到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: gh release upload "$TAG" install.zip --clobber
