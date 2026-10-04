@@ -1,5 +1,9 @@
 # MoeKoe MPRIS（Linux）
 
+⚠️VIBE CODING WARNING!
+
+![alt text](image.png)
+
 为 **MoeKoe Music** 提供 Linux 下的 **MPRIS2** 协议支持：在会话 D-Bus 上注册
 `org.mpris.MediaPlayer2.MoeKoeMusic`，把当前曲目、播放状态暴露给桌面组件，
 并通过 **Metadata 自定义键 + 独立 D-Bus 信号** 传输歌词。
@@ -362,3 +366,5 @@ python3 tests/test_e2e.py          # 端到端：WS 消息 → 桥接页 → 本
 ## License
 
 GPL-2.0（与 MoeKoe Music 主项目一致）
+
+Copyright (C) 2026 陈子涵
