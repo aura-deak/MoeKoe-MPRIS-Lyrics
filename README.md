@@ -3,7 +3,7 @@
 ⚠️VIBE CODING WARNING!
 
 
-[![](image.png)](player.bilibili.com/player.html?isOutside=true&aid=117383217808262&bvid=BV1YYH76FEm7&cid=42463002772&p=1)
+[![](image.png)](https://player.bilibili.com/player.html?isOutside=true&aid=117383217808262&bvid=BV1YYH76FEm7&cid=42463002772&p=1)
 
 
 为 **MoeKoe Music** 提供 Linux 下的 **MPRIS2** 协议支持：在会话 D-Bus 上注册
