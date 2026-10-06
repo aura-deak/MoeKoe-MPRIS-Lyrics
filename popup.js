@@ -9,12 +9,6 @@
 
 const HOST_ID = 'mpris-host';
 
-const MODE_TIPS = {
-  original: '单歌词：MPRIS 侧只出现原文，Metadata 键 moekoe:lyrics 与信号字段 text。',
-  translation: '单翻译：MPRIS 侧只出现译文，Metadata 键 moekoe:translation 与信号字段 translation。',
-  both: '歌词翻译：原文与译文同时传输，moekoe:lyrics 与 moekoe:translation 都会出现。'
-};
-
 const state = {
   mode: MoeKoeLyrics.DEFAULT_MODE,
   live: null,
@@ -168,25 +162,22 @@ function render() {
   }
 
   /* 提示信息 */
+  /* 右侧「运行异常排查」常驻展示，这里只把真实路径回填进去（不隐藏） */
   if (live && live.chmodCommand) {
-    notice('插件包（zip）安装不会保留可执行位，请在终端执行：');
-    $('chmod-command').hidden = false;
     $('chmod-command').textContent = live.chmodCommand;
+  }
+  if (live && live.hint) {
+    notice(live.hint);
+  } else if (live && live.hostLastError) {
+    notice(live.hostLastError);
+  } else if (live && live.sendError) {
+    notice(live.sendError);
+  } else if (!live && host && !host.authorized) {
+    notice('请在 设置 → 插件 → 插件管理 中授权本地程序 mpris-host，授权后桥接页才会打开');
+  } else if (!live && host && !host.valid) {
+    notice('本地程序声明校验失败：' + (host.errors || []).join('；'));
   } else {
-    $('chmod-command').hidden = true;
-    if (live && live.hint) {
-      notice(live.hint);
-    } else if (live && live.hostLastError) {
-      notice(live.hostLastError);
-    } else if (live && live.sendError) {
-      notice(live.sendError);
-    } else if (!live && host && !host.authorized) {
-      notice('请在 设置 → 插件 → 插件管理 中授权本地程序 mpris-host，授权后桥接页才会打开');
-    } else if (!live && host && !host.valid) {
-      notice('本地程序声明校验失败：' + (host.errors || []).join('；'));
-    } else {
-      notice('');
-    }
+    notice('');
   }
 
   /* 模式按钮 */
@@ -195,37 +186,40 @@ function render() {
     var active = button.dataset.mode === state.mode;
     button.setAttribute('aria-checked', active ? 'true' : 'false');
   });
-  $('mode-tip').textContent = MODE_TIPS[state.mode];
+  Array.prototype.forEach.call(document.querySelectorAll('.mode-tip'), function (tip) {
+    tip.hidden = tip.dataset.mode !== state.mode;
+  });
 
-  /* 传输预览 */
-  var preview = $('preview');
-  preview.innerHTML = '';
+  /* 传输预览：槽位已在 HTML 里写好，这里只填文本 + 显隐，不重建节点 */
   var line = live && live.line;
+  var sourceEl = $('preview-source');
+  var textEl = $('preview-text');
+  var transEl = $('preview-translation');
   if (!line) {
-    var empty = document.createElement('p');
-    empty.className = 'muted';
-    empty.textContent = live ? '暂无当前歌词行' : '等待宿主状态回执…';
-    preview.appendChild(empty);
+    sourceEl.hidden = true;
+    transEl.hidden = true;
+    textEl.className = 'muted';
+    textEl.hidden = false;
+    textEl.textContent = live ? '暂无当前歌词行' : '等待宿主状态回执…';
     return;
   }
 
   var projected = MoeKoeLyrics.projectLine(line, state.mode);
-  var source = document.createElement('p');
-  source.className = 'source';
-  source.textContent = '第 ' + (projected.index + 1) + ' 行 · ' + MoeKoeLyrics.modeLabel(state.mode);
-  preview.appendChild(source);
+  sourceEl.hidden = false;
+  sourceEl.textContent = '第 ' + (projected.index + 1) + ' 行 · ' + MoeKoeLyrics.modeLabel(state.mode);
 
   if (typeof projected.text === 'string') {
-    var original = document.createElement('p');
-    original.className = 'line-text';
-    original.textContent = projected.text;
-    preview.appendChild(original);
+    textEl.hidden = false;
+    textEl.className = 'line-text';
+    textEl.textContent = projected.text;
+  } else {
+    textEl.hidden = true;
   }
   if (typeof projected.translation === 'string') {
-    var translation = document.createElement('p');
-    translation.className = 'line-translation';
-    translation.textContent = projected.translation || '（本行无译文）';
-    preview.appendChild(translation);
+    transEl.hidden = false;
+    transEl.textContent = projected.translation || '（本行无译文）';
+  } else {
+    transEl.hidden = true;
   }
 }
 

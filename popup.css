@@ -1,12 +1,14 @@
 :root {
   color-scheme: light dark;
-  --bg: #17171f;
-  --panel: #1f1f2a;
-  --line: #2e2e3c;
-  --text: #ececf3;
-  --muted: #9a9aae;
-  --accent: #8f6bff;
-  --ok: #4cd08a;
+  --bg: #0b0b10;
+  --panel: #16161d;
+  --line: #26262e;
+  --text: #e8e8ee;
+  --muted: #8b8b96;
+  --dim: #6a6a75;
+  --accent: #7c5cff;
+  --accent-soft: rgba(124, 92, 255, 0.16);
+  --ok: #22c55e;
   --warn: #ffb454;
   --bad: #ff6b81;
 }
@@ -16,12 +18,58 @@
 }
 
 body {
-  width: 340px;
+  width: 760px;
   margin: 0;
-  padding: 14px;
+  padding: 16px;
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.5 system-ui, "Noto Sans CJK SC", "PingFang SC", sans-serif;
+  font: 12px/1.5 system-ui, "Noto Sans CJK SC", "PingFang SC", sans-serif;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.col .grow {
+  flex: 1 1 auto;
+}
+
+/* 悬浮歌词显示 / 传输预览底部对齐：卡片自身把剩余空间吃掉，tip 贴卡片底 */
+.grow section,
+section.grow {
+  display: flex;
+  flex-direction: column;
+}
+
+section.grow .tip {
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.col-main {
+  grid-column: 1;
+}
+
+.grow {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.grow .preview,
+.grow .help,
+.grow .troubleshoot-body {
+  flex: 1;
 }
 
 header {
@@ -52,16 +100,25 @@ section {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
+  padding: 12px 14px;
 }
 
 h2 {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--text);
   letter-spacing: 0.04em;
+}
+
+.tip code,
+.help code {
+  background: #101018;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: #cfe6ff;
 }
 
 .status {
@@ -74,7 +131,7 @@ h2 {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 3px 0;
+  padding: 4px 0;
 }
 
 .status span {
@@ -105,13 +162,49 @@ h2 {
   margin: 8px 0 0;
   padding: 8px;
   border-radius: 6px;
-  background: #10101a;
+  background: #0d0d12;
   color: #cfe6ff;
-  font: 11px/1.5 ui-monospace, "JetBrains Mono", monospace;
+  font: 11px/1.6 ui-monospace, "JetBrains Mono", monospace;
   white-space: pre-wrap;
   word-break: break-all;
   cursor: text;
   user-select: text;
+}
+
+.troubleshoot {
+  border-color: rgba(255, 180, 84, 0.35);
+}
+
+.troubleshoot h3 {
+  margin: 12px 0 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.help {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.help li {
+  position: relative;
+  padding: 4px 0 0 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.help li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 12px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .modes {
@@ -142,13 +235,24 @@ h2 {
   color: var(--muted);
 }
 
+.mode-tip {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
 .modes button:hover {
   border-color: var(--accent);
 }
 
 .modes button[aria-checked="true"] {
   border-color: var(--accent);
-  background: rgba(143, 107, 255, 0.16);
+  background: var(--accent);
+  color: #fff;
+}
+
+.modes button[aria-checked="true"] span {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .modes button[aria-checked="true"] span {
@@ -249,7 +353,7 @@ h2 {
 }
 
 .setting-row button:active {
-  background: rgba(143, 107, 255, 0.16);
+  background: var(--accent-soft);
 }
 
 .preview {
@@ -292,12 +396,13 @@ footer {
 
 footer button {
   flex: 1;
-  padding: 7px 10px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
+  font-size: 12px;
 }
 
 footer button:hover {

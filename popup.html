@@ -14,6 +14,9 @@
     </div>
   </header>
 
+  <div class="layout">
+    <div class="col col-main">
+
   <section>
     <h2>连接状态</h2>
     <ul class="status" id="status-list">
@@ -23,7 +26,6 @@
       <li><span>进度</span><b id="position-state">—</b></li>
     </ul>
     <p class="notice" id="notice" hidden></p>
-    <pre class="command" id="chmod-command" hidden></pre>
   </section>
 
   <section>
@@ -42,10 +44,12 @@
         <span>原文 + 译文</span>
       </button>
     </div>
-    <p class="tip" id="mode-tip"></p>
+    <p class="tip mode-tip" data-mode="original" hidden>单歌词：MPRIS 侧只出现原文，Metadata 键 <code>moekoe:lyrics</code> 与信号字段 <code>text</code>。</p>
+    <p class="tip mode-tip" data-mode="translation" hidden>单翻译：MPRIS 侧只出现译文，Metadata 键 <code>moekoe:translation</code> 与信号字段 <code>translation</code>。</p>
+    <p class="tip mode-tip" data-mode="both" hidden>歌词翻译：原文与译文同时传输，<code>moekoe:lyrics</code> 与 <code>moekoe:translation</code> 都会出现。</p>
   </section>
 
-  <section>
+  <section class="grow">
     <h2>悬浮歌词显示</h2>
     <label class="switch-row">
       <span>总开关</span>
@@ -82,26 +86,62 @@
       <button type="button" id="overlay-restart">立即重启</button>
     </div>
     <p class="tip">设置即时写入后端并持久化，悬浮窗实时生效。</p>
-    <p class="tip">
-      关闭「鼠标穿透」后可直接<b>拖动悬浮文字</b>调整位置，松手自动保存（位置变为「自定义」）。
-    </p>
-    <p class="tip">
-      开启「鼠标穿透」后悬浮窗不接收鼠标点击，<b>点击桌面托盘里的悬浮歌词图标即可关闭</b>；
-      也可关闭穿透，再在悬浮文字上右键 → 退出。
-    </p>
-    <p class="tip">当前歌词为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。</p>
-    <p class="tip">
-      改动显示设置后若悬浮窗没有及时更新，可点上方「立即重启」重新加载；
-      <b>完全退出并重启 MoeKoe</b> 也能达到同样效果。
-    </p>
+  </section>
+
+    </div>
+    <div class="col">
+
+  <section class="grow">
+    <h2>悬浮歌词操作说明</h2>
+    <ul class="help">
+      <li>关闭「鼠标穿透」后可直接<b>拖动悬浮文字</b>调整位置，松手自动保存（位置变为「自定义」）。</li>
+      <li>开启「鼠标穿透」后悬浮窗不接收鼠标点击，<b>点击桌面托盘里的悬浮歌词图标即可关闭</b>；也可关闭穿透，再在悬浮文字上右键 → 退出。</li>
+      <li>当前歌词为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。</li>
+      <li>改动显示设置后若悬浮窗没有及时更新，可点上方「立即重启」重新加载；完全退出并重启 MoeKoe 也能达到同样效果。</li>
+      <li>曲目信息需<b>先播放一次</b>才会推送；暂停期间不再刷新进度，位置以最后一次校正为准。</li>
+      <li>歌词来源是 MoeKoe 自己（含酷狗翻译），不联网取词；纯音乐行会按模式投影出「（本行无译文）」占位。</li>
+      <li>悬浮窗基于 wlr-layer-shell，兼容 niri、Hyprland、Sway 等合成器；X11 会话不可用。</li>
+      <li>悬浮歌词客户端由插件自动拉起，设 <code>MOEKOE_MPRIS_NO_OVERLAY=1</code> 可禁用。</li>
+    </ul>
   </section>
 
   <section>
     <h2>传输预览</h2>
     <div class="preview" id="preview">
-      <p class="muted">等待歌词数据…</p>
+      <p class="source" id="preview-source">—</p>
+      <p class="line-text" id="preview-text">等待歌词数据…</p>
+      <p class="line-translation" id="preview-translation"></p>
     </div>
+    <p class="tip">预览按当前传输模式投影，与推到 D-Bus 的内容一致。</p>
   </section>
+
+    </div>
+    <div class="col">
+
+  <section class="troubleshoot grow">
+    <h2>运行异常排查</h2>
+    <p class="tip">歌词不出、悬浮窗不出现时按下面顺序排查，与当前连接状态无关。</p>
+    <h3>1. 安装依赖</h3>
+    <pre class="command">Debian / Ubuntu
+sudo apt install python3-dbus python3-gi gir1.2-gtk-4.0
+
+Arch / CachyOS
+sudo pacman -S python-dbus python-gobject gtk4 \
+  gtk4-layer-shell</pre>
+    <p class="tip">缺 <code>gtk4-layer-shell</code> 时悬浮窗起不来；缺 <code>python-dbus</code> 只是没托盘，不影响歌词。</p>
+    <h3>2. 补上可执行位</h3>
+    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host</pre>
+    <p class="tip">zip 安装不保留可执行位，本地程序会因此起不来。</p>
+    <h3>3. 还不行</h3>
+    <ul class="help">
+      <li>在 设置 → 插件 → 插件管理 里确认已授权本地程序 <code>mpris-host</code>。</li>
+      <li>确认 MoeKoe 已开启「API 模式」（默认 <code>127.0.0.1:6520</code>）。</li>
+      <li>点下方「重新连接」，或完全退出并重启 MoeKoe。</li>
+    </ul>
+  </section>
+
+    </div>
+  </div>
 
   <footer>
     <button type="button" id="reconnect">重新连接</button>
