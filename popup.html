@@ -120,23 +120,20 @@
 
   <section class="troubleshoot grow">
     <h2>运行异常排查</h2>
-    <p class="tip">歌词不出、悬浮窗不出现时按下面顺序排查，与当前连接状态无关。</p>
+    <p class="tip">歌词不出、悬浮窗不出现时按下面顺序排查</p>
     <h3>1. 安装依赖</h3>
-    <pre class="command">Debian / Ubuntu
-sudo apt install python3-dbus python3-gi gir1.2-gtk-4.0
+    <b>Debian / Ubuntu</b>
+    <pre class="command">sudo apt install python3-dbus python3-gi gir1.2-gtk-4.0</pre>
+    <b>Arch / CachyOS</b>
+    <pre class="command">sudo pacman -S python-dbus python-gobject gtk4 gtk4-layer-shell</pre>
 
-Arch / CachyOS
-sudo pacman -S python-dbus python-gobject gtk4 \
-  gtk4-layer-shell</pre>
-    <p class="tip">缺 <code>gtk4-layer-shell</code> 时悬浮窗起不来；缺 <code>python-dbus</code> 只是没托盘，不影响歌词。</p>
     <h3>2. 补上可执行位</h3>
-    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host</pre>
-    <p class="tip">zip 安装不保留可执行位，本地程序会因此起不来。</p>
+    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/MoeKoe-MPRIS-Lyrics-*/bin/mpris-host</pre>
     <h3>3. 还不行</h3>
     <ul class="help">
       <li>在 设置 → 插件 → 插件管理 里确认已授权本地程序 <code>mpris-host</code>。</li>
       <li>确认 MoeKoe 已开启「API 模式」（默认 <code>127.0.0.1:6520</code>）。</li>
-      <li>点下方「重新连接」，或完全退出并重启 MoeKoe。</li>
+      <li>点下方「重新连接」和「刷新」，或完全退出并重启 MoeKoe。</li>
     </ul>
   </section>
 
