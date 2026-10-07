@@ -195,6 +195,24 @@
       .then(function () { return pushStatus(true); });
   }
 
+  /* ---------------- 向 MoeKoe WebSocket 发送控制命令 ---------------- */
+
+  var VALID_COMMANDS = { toggle: true, next: true, prev: true };
+
+  function sendControl(command) {
+    var cmd = String(command || '');
+    if (!VALID_COMMANDS[cmd]) return;
+    if (!socket || socket.readyState !== 1) return;
+    try {
+      socket.send(JSON.stringify({
+        type: 'control',
+        data: { command: cmd }
+      }));
+    } catch (error) {
+      // 发送失败静默处理：控制权在用户手里，失败了再点一次即可
+    }
+  }
+
   /* ---------------- 歌词处理 ---------------- */
 
   function applyLyrics(raw, trackChanged) {
@@ -349,6 +367,9 @@
         } else if (message.cmd === 'push-all') {
           pushAll();
         }
+      } else if (message.type === 'control') {
+        // MPRIS D-Bus 调用 → 宿主 → 桥接页，再经 WebSocket 发给 MoeKoe
+        sendControl(message.command);
       }
     });
   }

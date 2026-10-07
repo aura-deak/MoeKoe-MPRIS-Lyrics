@@ -182,17 +182,12 @@ def run():
     check(str(root["Identity"]) == "MoeKoe Music", "Identity = MoeKoe Music")
     check(bool(root["CanQuit"]) is False, "CanQuit = false（最小可用）")
     player_props = props.GetAll(IFACE_PLAYER)
-    check(bool(player_props["CanControl"]) is False, "CanControl = false")
-    check(bool(player_props["CanPlay"]) is False, "CanPlay = false")
-
-    try:
-        player.Play()
-        check(False, "Play() 应返回 Not Supported")
-    except dbus.exceptions.DBusException as exc:
-        check(
-            exc.get_dbus_name() == "org.freedesktop.DBus.Error.NotSupported",
-            "Play() 返回 Not Supported（%s）" % exc.get_dbus_name(),
-        )
+    check(bool(player_props["CanControl"]) is True, "CanControl = true")
+    check(bool(player_props["CanPlay"]) is True, "CanPlay = true")
+    check(bool(player_props["CanPause"]) is True, "CanPause = true")
+    check(bool(player_props["CanGoNext"]) is True, "CanGoNext = true")
+    check(bool(player_props["CanGoPrevious"]) is True, "CanGoPrevious = true")
+    check(bool(player_props["CanSeek"]) is False, "CanSeek = false（WS API 暂未开放）")
 
     try:
         props.Set(IFACE_PLAYER, "Volume", dbus.Double(0.5))
@@ -447,6 +442,82 @@ def run():
     host.send({"type": "bridge-command", "cmd": "bogus"})
     err = host.wait_for("error")
     check(err is not None, "未知 bridge-command 返回 error")
+
+    # ---------------- 播放控制（D-Bus → stdout control 消息） ----------------
+    print("\n[播放控制：Next/Previous/PlayPause]")
+    host.pending()  # 清空已有的消息
+    player.Next()
+    next_msg = host.wait_for("control")
+    check(next_msg is not None and str(next_msg.get("command")) == "next",
+          "Next() 下发 {type:control, command:next}")
+
+    host.pending()
+    player.Previous()
+    prev_msg = host.wait_for("control")
+    check(prev_msg is not None and str(prev_msg.get("command")) == "prev",
+          "Previous() 下发 {type:control, command:prev}")
+
+    host.pending()
+    player.PlayPause()
+    pp_msg = host.wait_for("control")
+    check(pp_msg is not None and str(pp_msg.get("command")) == "toggle",
+          "PlayPause() 下发 {type:control, command:toggle}")
+
+    print("\n[播放控制：Play 仅在未播放时下发，Pause 仅在播放时下发]")
+    # 先把状态明确切到 Paused
+    host.send({"type": "status", "isPlaying": False, "position": 10.0})
+    pump()
+    host.pending()
+    player.Play()
+    play_msg = host.wait_for("control")
+    check(play_msg is not None and str(play_msg.get("command")) == "toggle",
+          "Play() 在 Paused 时下发 toggle")
+
+    # 再切到 Playing，验证 Play 不下发、Pause 下发
+    host.send({"type": "status", "isPlaying": True, "position": 10.0})
+    pump()
+    host.pending()
+    player.Play()
+    play_msg2 = host.wait_for("control", timeout=0.5)
+    check(play_msg2 is None, "Play() 在 Playing 时不下发控制")
+    leftover = [m for m in host.pending() if m.get("type") == "control"]
+    check(not leftover, "Playing 时 Play() 无 control 消息")
+
+    host.pending()
+    player.Pause()
+    pause_msg = host.wait_for("control")
+    check(pause_msg is not None and str(pause_msg.get("command")) == "toggle",
+          "Pause() 在 Playing 时下发 toggle")
+
+    host.pending()
+    # 切回 Paused，验证 Pause 不下发
+    host.send({"type": "status", "isPlaying": False, "position": 10.0})
+    pump()
+    host.pending()
+    player.Pause()
+    pause_msg2 = host.wait_for("control", timeout=0.5)
+    check(pause_msg2 is None, "Pause() 在 Paused 时不下发控制")
+    leftover = [m for m in host.pending() if m.get("type") == "control"]
+    check(not leftover, "Paused 时 Pause() 无 control 消息")
+
+    print("\n[播放控制：Seek/SetPosition 仍未开放]")
+    try:
+        player.Seek(dbus.Int64(5_000_000))
+        check(False, "Seek() 应返回 Not Supported")
+    except dbus.exceptions.DBusException as exc:
+        check(
+            exc.get_dbus_name() == "org.freedesktop.DBus.Error.NotSupported",
+            "Seek() 返回 Not Supported（WS API 未开放）",
+        )
+    try:
+        player.SetPosition(dbus.ObjectPath("/org/mpris/MediaPlayer2/Track/any"),
+                           dbus.Int64(10_000_000))
+        check(False, "SetPosition() 应返回 Not Supported")
+    except dbus.exceptions.DBusException as exc:
+        check(
+            exc.get_dbus_name() == "org.freedesktop.DBus.Error.NotSupported",
+            "SetPosition() 返回 Not Supported（WS API 未开放）",
+        )
 
     # ---------------- 心跳与关闭 ----------------
     print("\n[生命周期]")

@@ -409,12 +409,12 @@ def player_properties(state):
         "Position": ("x", state.current_position_us()),
         "MinimumRate": ("d", 1.0),
         "MaximumRate": ("d", 1.0),
-        "CanGoNext": ("b", False),
-        "CanGoPrevious": ("b", False),
-        "CanPlay": ("b", False),
-        "CanPause": ("b", False),
+        "CanGoNext": ("b", True),
+        "CanGoPrevious": ("b", True),
+        "CanPlay": ("b", True),
+        "CanPause": ("b", True),
         "CanSeek": ("b", False),
-        "CanControl": ("b", False),
+        "CanControl": ("b", True),
     }
 
 
@@ -688,42 +688,45 @@ if DBUS_AVAILABLE:
         def Quit(self):
             raise NotSupported("MoeKoe Music 插件未开放 Quit")
 
-        # ---------------- MPRIS Player（最小可用：不开放控制） ----------------
+        # ---------------- MPRIS Player：通过桥接页控制 MoeKoe ----------------
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def Next(self):
-            raise NotSupported()
+            emit({"type": "control", "command": "next"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def Previous(self):
-            raise NotSupported()
+            emit({"type": "control", "command": "prev"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def Pause(self):
-            raise NotSupported()
+            if self.state.status == "Playing":
+                emit({"type": "control", "command": "toggle"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def PlayPause(self):
-            raise NotSupported()
+            emit({"type": "control", "command": "toggle"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def Stop(self):
-            raise NotSupported()
+            if self.state.status == "Playing":
+                emit({"type": "control", "command": "toggle"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
         def Play(self):
-            raise NotSupported()
+            if self.state.status != "Playing":
+                emit({"type": "control", "command": "toggle"})
 
         @dbus.service.method(IFACE_PLAYER, in_signature="x", out_signature="")
         def Seek(self, offset):
-            raise NotSupported()
+            raise NotSupported("MoeKoe WebSocket API 暂未开放 Seek")
 
         @dbus.service.method(IFACE_PLAYER, in_signature="ox", out_signature="")
         def SetPosition(self, track_id, position):
-            raise NotSupported()
+            raise NotSupported("MoeKoe WebSocket API 暂未开放 SetPosition")
 
         @dbus.service.method(IFACE_PLAYER, in_signature="s", out_signature="")
         def OpenUri(self, uri):
-            raise NotSupported()
+            raise NotSupported("MoeKoe WebSocket API 暂未开放 OpenUri")
 
         # ---------------- Introspection ----------------
         @dbus.service.method(
