@@ -63,7 +63,12 @@ jobs:
 
       - name: Create release
         env:
-          GH_TOKEN: ${{ github.token }}
+          # 必须用 PAT 而非 GITHUB_TOKEN 创建 Release：
+          # GITHUB_TOKEN 触发的事件不会唤醒其他 workflow（GitHub 防递归设计），
+          # notify-plugin-publish 监听的 release published 就永远不会触发。
+          # PLUGINS_ISSUE_TOKEN（classic PAT，public_repo scope）触发的事件可正常联动；
+          # 未配置该 Secret 时回退 GITHUB_TOKEN，Release 仍会创建，只是通知需手动补发。
+          GH_TOKEN: ${{ secrets.PLUGINS_ISSUE_TOKEN || github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" \
