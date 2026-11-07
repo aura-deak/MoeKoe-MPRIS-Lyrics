@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# pre-push 校验：推送的每个 vX.Y.Z tag，其指向的提交里 manifest.json
+# 的 version 必须与 tag 一致，否则拒绝推送。
+#
+# 目的：防止绕过 scripts/release-tag 裸打 tag，导致发布的 Release 版本
+# 与插件 manifest 版本脱节。
+#
+# 需要 git config core.hooksPath .githooks（本仓库已配置）。
+
+set -euo pipefail
+
+z40=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  # 删除远端 tag / 非版本 tag 不校验
+  [[ "$local_sha" == "$z40" ]] && continue
+  [[ "$local_ref" == refs/tags/v* ]] || continue
+  tag="${local_ref#refs/tags/}"
+
+  [[ "$tag" =~ ^v[0-9]+(\.[0-9]+){1,3}$ ]] || continue
+
+  manifest_version="$(git show "$local_sha:manifest.json" 2>/dev/null |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])' || true)"
+
+  if [[ "$manifest_version" != "${tag#v}" ]]; then
+    echo "拒绝推送: tag $tag 与该提交里 manifest.json 的 version ('$manifest_version') 不一致" >&2
+    echo "如需删除本地重打: git tag -d $tag && scripts/release-tag $tag" >&2
+    exit 1
+  fi
+
+  echo "OK: $tag == manifest $manifest_version"
+done
+
+exit 0
