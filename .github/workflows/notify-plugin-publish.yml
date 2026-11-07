@@ -139,5 +139,6 @@ jobs:
           gh issue create \
             -R "$TARGET_REPO" \
             --title "[Plugin]: $OPERATION_TYPE $REPO_NAME $TAG" \
-            --label "plugin,publish" \
+            # 目标仓库实际只有 plugin 标签（无 publish），打不存在的标签会整体失败
+            --label "plugin" \
             --body-file issue-body.md
