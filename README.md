@@ -2,10 +2,10 @@
 
 ⚠️VIBE CODING WARNING!
 
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/710cd88c-da65-41c1-bece-79b8bab9bada" />
+图中终端歌词显示为mpris-lyrics，悬浮歌词显示为wshowlyrics  
 
-[![](image.png)](https://www.bilibili.com/video/BV1YYH76FEm7/)
-
-
+---
 为 **MoeKoe Music** 提供 Linux 下的 **MPRIS2** 协议支持：在会话 D-Bus 上注册
 `org.mpris.MediaPlayer2.MoeKoeMusic`，把当前曲目、播放状态暴露给桌面组件，
 并把 MPRIS Player 控制指令反向桥接到 MoeKoe WebSocket API。
