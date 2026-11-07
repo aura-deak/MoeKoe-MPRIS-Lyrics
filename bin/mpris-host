@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -90,6 +91,225 @@ def log(message):
 
 
 # --------------------------------------------------------------------------
+# 启动包装自动修复（规避 Electron chromium 重复注册 MPRIS）
+# --------------------------------------------------------------------------
+
+LAUNCHER_FEATURE_FLAG = "--disable-features=MediaSessionService"
+LAUNCHER_PATH = os.path.join(
+    os.path.expanduser("~"), ".local", "bin", "moekoemusic"
+)
+
+
+def find_moe_koe_exec():
+    """定位真正的 MoeKoe 可执行入口（跳过我们自己的启动包装）。"""
+    for candidate in (
+        "/usr/bin/moekoemusic",
+        "/usr/local/bin/moekoemusic",
+        "/opt/moekoemusic/moekoemusic",
+        "/opt/MoeKoeMusic/moekoemusic",
+    ):
+        if os.path.isfile(candidate):
+            return candidate, None
+    # 兜底：从系统 .desktop 的 Exec= 反查
+    for directory in ("/usr/share/applications", "/usr/local/share/applications"):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in sorted(names):
+            if not name.endswith(".desktop"):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError:
+                continue
+            exec_line = ""
+            for line in content.splitlines():
+                if line.startswith("Exec="):
+                    exec_line = line[5:].strip()
+                    break
+            if "moekoemusic" not in exec_line.lower():
+                continue
+            fields = exec_line.split()
+            if fields and os.path.isfile(fields[0]):
+                return fields[0], (path, content)
+            return None, (path, content)
+    return None, None
+
+
+def read_desktop_source():
+    """找到系统的 moekoemusic.desktop 以便生成用户级覆盖。"""
+    for directory in ("/usr/share/applications", "/usr/local/share/applications"):
+        path = os.path.join(directory, "moekoemusic.desktop")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return path, fh.read()
+        except OSError:
+            continue
+    return None, None
+
+
+def fix_launcher():
+    """创建/更新带 MediaSessionService 禁用 flag 的启动包装。返回结果 dict。"""
+    # type 字段供弹窗按 message.type 分派（缺了它会静默超时）
+    result = {"type": "fix-launcher-result"}
+
+    real, desktop_pair = find_moe_koe_exec()
+    if real is None:
+        if desktop_pair is None:
+            result.update(
+                ok=False,
+                message="未找到 MoeKoe Music 可执行文件（/usr/bin/moekoemusic 不存在，且没有相关 .desktop）",
+            )
+            return result
+        # desktop 里有 Exec 但指向不存在的裸命令名（PATH 由菜单环境决定），
+        # 包装里仍然写裸命令名让菜单环境自己解析
+        exec_line = ""
+        for line in desktop_pair[1].splitlines():
+            if line.startswith("Exec="):
+                exec_line = line[5:].strip()
+                break
+        fields = exec_line.split()
+        real = fields[0].strip('"') if fields else "moekoemusic"
+
+    already = False
+    if os.path.isfile(LAUNCHER_PATH):
+        try:
+            with open(LAUNCHER_PATH, encoding="utf-8", errors="replace") as fh:
+                already = LAUNCHER_FEATURE_FLAG in fh.read()
+        except OSError:
+            pass
+
+    script = (
+        "#!/bin/sh\n"
+        "# 由 MoeKoe MPRIS 插件自动生成：禁用 Electron 内置 MediaSession MPRIS，\n"
+        "# 避免 chromium.instance* 与扩展的 mpris-host 重复注册（前者抢在前面且无歌词）。\n"
+        "exec %s %s \"$@\"\n" % (shlex.quote(real), LAUNCHER_FEATURE_FLAG)
+    )
+    try:
+        os.makedirs(os.path.dirname(LAUNCHER_PATH), exist_ok=True)
+        with open(LAUNCHER_PATH, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        os.chmod(LAUNCHER_PATH, 0o755)
+    except OSError as exc:
+        result.update(ok=False, message="写入启动包装 %s 失败: %s" % (LAUNCHER_PATH, exc))
+        return result
+
+    notes = []
+    # 同步覆盖应用菜单启动项（用户级，优先于系统 .desktop）
+    if desktop_pair is None:
+        _, desktop_content = read_desktop_source()
+        desktop_pair = ("moekoemusic.desktop", desktop_content) if desktop_content else None
+    if desktop_pair:
+        src_path, content = desktop_pair
+        name = os.path.basename(src_path)
+        override_dir = os.path.join(
+            os.path.expanduser("~"), ".local", "share", "applications"
+        )
+        try:
+            os.makedirs(override_dir, exist_ok=True)
+            lines = []
+            for line in content.splitlines():
+                if line.startswith("Exec="):
+                    lines.append("Exec=%s %%U" % LAUNCHER_PATH)
+                elif line.startswith("TryExec="):
+                    continue
+                else:
+                    lines.append(line)
+            with open(os.path.join(override_dir, name), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            notes.append("应用菜单启动项已覆盖（%s）" % name)
+        except OSError:
+            notes.append("应用菜单启动项覆盖失败，可手动把 .desktop 的 Exec 改为 %s" % LAUNCHER_PATH)
+    else:
+        notes.append("未找到系统 .desktop，若从菜单启动请手动把 Exec 改为 %s" % LAUNCHER_PATH)
+
+    # PATH 检查：命令行敲 moekoemusic 时包装是否优先于真实二进制
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    if LAUNCHER_PATH.rsplit(os.sep, 1)[0] in parts:
+        real_dir = os.path.dirname(real) if os.sep in real else ""
+        if real_dir and parts.index(LAUNCHER_PATH.rsplit(os.sep, 1)[0]) > parts.index(real_dir):
+            notes.append(
+                "PATH 中 ~/.local/bin 排在 %s 之后，命令行启动不会走包装，请调整 PATH 顺序" % real_dir
+            )
+    else:
+        notes.append(
+            'PATH 不含 ~/.local/bin，命令行启动不会走包装：请在 shell 配置中加 export PATH="$HOME/.local/bin:$PATH"'
+        )
+
+    verb = "启动包装已就绪" if already else "已创建启动包装"
+    result.update(
+        ok=True,
+        message="%s（%s）。%s。完全退出并重启 MoeKoe 后生效。"
+        % (verb, LAUNCHER_PATH, "；".join(notes)),
+    )
+    return result
+
+
+def unfix_launcher():
+    """撤销 fix_launcher 的改动：删除启动包装与菜单覆盖，卸载插件前必须运行。
+
+    安全原则：只清理本插件生成的内容 ——
+      * 启动包装仅在内容含本插件标记（flag / 注释）时删除，用户自建脚本不碰；
+      * 菜单覆盖仅在 Exec 指向本插件启动包装时删除，其他覆盖文件不碰。
+    """
+    result = {"type": "unfix-launcher-result"}
+    notes = []
+
+    # 1) 删除启动包装
+    if os.path.isfile(LAUNCHER_PATH):
+        try:
+            with open(LAUNCHER_PATH, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+            if LAUNCHER_FEATURE_FLAG in content or "MoeKoe MPRIS" in content:
+                os.remove(LAUNCHER_PATH)
+                notes.append("已删除启动包装 %s" % LAUNCHER_PATH)
+            else:
+                notes.append("启动包装 %s 不是本插件生成的，未改动" % LAUNCHER_PATH)
+        except OSError as exc:
+            result.update(ok=False, message="读取/删除启动包装 %s 失败: %s" % (LAUNCHER_PATH, exc))
+            return result
+    else:
+        notes.append("启动包装不存在（%s）" % LAUNCHER_PATH)
+
+    # 2) 删除应用菜单覆盖（用户级 .desktop）
+    override_dir = os.path.join(
+        os.path.expanduser("~"), ".local", "share", "applications"
+    )
+    removed_desktop = False
+    if os.path.isdir(override_dir):
+        try:
+            names = os.listdir(override_dir)
+        except OSError:
+            names = []
+        for name in sorted(names):
+            if not name.endswith(".desktop"):
+                continue
+            path = os.path.join(override_dir, name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError:
+                continue
+            if LAUNCHER_PATH not in content:
+                continue
+            try:
+                os.remove(path)
+                removed_desktop = True
+                notes.append("已删除应用菜单覆盖（%s），恢复使用系统启动项" % name)
+            except OSError as exc:
+                notes.append("删除应用菜单覆盖 %s 失败: %s" % (path, exc))
+    if not removed_desktop:
+        notes.append("没有需要清理的应用菜单覆盖")
+
+    notes.append("插件已恢复原状，现在可以安全卸载本插件")
+    result.update(ok=True, message="撤销完成：%s。" % "；".join(notes))
+    return result
+
+
+# --------------------------------------------------------------------------
 # 播放状态
 # --------------------------------------------------------------------------
 
@@ -104,6 +324,9 @@ class PlayerState:
         self.duration_us = 0
         self.position_us = 0
         self.anchor = time.monotonic()
+        # xesam:asText 配置
+        self.asTextFormat = 'lrc'    # 'plain' | 'lrc'
+        self.asTextSource = 'original' # 'original' | 'translation' 
 
     # ---- 进度 ----
     def set_position_seconds(self, seconds):
@@ -278,6 +501,21 @@ def build_metadata(state):
     album = str(state.track.get("album") or "")
     if album:
         metadata["xesam:album"] = dbus.String(album)
+
+    # xesam:asText —— 歌词全文（Xesam 规范：String 类型）
+    lyrics = state.track.get("lyrics") or ""
+    if lyrics:
+        metadata["xesam:asText"] = dbus.String(lyrics)
+
+    # xesam:lyricist —— 作词人（Xesam 规范：字符串数组）
+    lyricist_val = state.track.get("lyricist") or []
+    if isinstance(lyricist_val, str):
+        lyricist_val = [lyricist_val]
+    lyricists = [str(item) for item in lyricist_val if item]
+    if lyricists:
+        metadata["xesam:lyricist"] = dbus.Array(
+            [dbus.String(a) for a in lyricists], signature="s"
+        )
 
     art = str(state.track.get("artUrl") or "")
     if art.startswith(("http://", "https://", "file://")):
@@ -596,6 +834,27 @@ class Controller:
 
     def on_bridge_command(self, payload):
         cmd = str(payload.get("cmd") or "")
+        if cmd == "set-config":
+            if payload.get("asTextFormat") in ("plain", "lrc"):
+                self.state.asTextFormat = payload["asTextFormat"]
+            if payload.get("asTextSource") in ("original", "translation"):
+                self.state.asTextSource = payload["asTextSource"]
+            # 不主动通知 Metadata；等待 bridge 重新推送 track 后由 on_track 自然触发
+            emit({"type": "bridge-command", "cmd": "set-config", "asTextFormat": self.state.asTextFormat, "asTextSource": self.state.asTextSource})
+            return
+        if cmd == "fix-launcher":
+            # 本地处理：生成带 --disable-features=MediaSessionService 的启动包装，
+            # 结果直接回执给弹窗（不经桥接页）
+            result = fix_launcher()
+            log("fix-launcher: ok=%s %s" % (result.get("ok"), result.get("message", "")))
+            emit(result)
+            return
+        if cmd == "unfix-launcher":
+            # 本地处理：删除插件生成的启动包装与菜单覆盖（卸载前必须运行）
+            result = unfix_launcher()
+            log("unfix-launcher: ok=%s %s" % (result.get("ok"), result.get("message", "")))
+            emit(result)
+            return
         if cmd not in ("reconnect", "push-all"):
             emit({"type": "error", "message": "未知 bridge-command: %s" % cmd})
             return
@@ -612,6 +871,8 @@ class Controller:
                 ),
                 "pid": os.getpid(),
                 "statusAt": int(time.time() * 1000),
+                "asTextFormat": self.state.asTextFormat,
+                "asTextSource": self.state.asTextSource,
             }
         )
         return merged

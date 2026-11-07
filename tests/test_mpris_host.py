@@ -222,6 +222,138 @@ def run():
     check("moekoe:lyrics" not in metadata, "Metadata 不含私有歌词键 moekoe:lyrics")
     check("moekoe:translation" not in metadata, "Metadata 不含私有歌词键 moekoe:translation")
 
+    # ---------------- xesam:asText 与 xesam:lyricist ----------------
+    print("\n[歌词元数据 xesam:asText / xesam:lyricist]")
+    # 新曲目：携带歌词全文与作词人
+    host.send(
+        {
+            "type": "track",
+            "track": {
+                "id": "LYR123",
+                "title": "歌",
+                "artists": ["歌手"],
+                "lyrics": "第一行\n第二行\n[00:03.00]第三行",
+                "lyricist": ["作词者A", "作词者B"],
+            },
+            "duration": 100.0,
+            "position": 0.0,
+            "status": "Playing",
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(str(metadata.get("xesam:asText", "")) == "第一行\n第二行\n[00:03.00]第三行",
+          "xesam:asText 携带歌词全文")
+    check(
+        [str(item) for item in metadata.get("xesam:lyricist", [])] == ["作词者A", "作词者B"],
+        "xesam:lyricist 携带作词人列表",
+    )
+
+    # 无歌词 / 无作词人时不应出现对应键
+    host.send(
+        {
+            "type": "track",
+            "track": {
+                "id": "NOLYR",
+                "title": "纯音乐",
+                "artists": ["歌手"],
+            },
+            "duration": 50.0,
+            "position": 0.0,
+            "status": "Playing",
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check("xesam:asText" not in metadata, "无歌词时不出现 xesam:asText")
+    check("xesam:lyricist" not in metadata, "无作词人时不出现 xesam:lyricist")
+
+    # ---------------- asTextFormat 与 asTextSource 切换 ----------------
+    print("\n[xesam:asText 格式与来源切换]")
+
+    def query_host_config():
+        """发送 status-request 并返回合并状态中的 asTextFormat/asTextSource"""
+        host.send({"type": "status-request"})
+        reply = host.wait_for("status")
+        if reply and reply.get("status"):
+            return (
+                reply["status"].get("asTextFormat"),
+                reply["status"].get("asTextSource")
+            )
+        return (None, None)
+
+    # 1. 默认 lrc + original（与 popup.js DEFAULT_CONFIG 一致）
+    fmt, src = query_host_config()
+    check(fmt == 'lrc', "默认 asTextFormat = lrc (实际: %s)" % str(fmt))
+    check(src == 'original', "默认 asTextSource = original (实际: %s)" % str(src))
+
+    # 2. 切换为 plain
+    host.send({"type": "bridge-command", "cmd": "set-config", "asTextFormat": "plain"})
+    pump()
+    fmt, _ = query_host_config()
+    check(fmt == 'plain', "set-config 后 asTextFormat = plain (实际: %s)" % str(fmt))
+
+    # 3. 切换为 translation source
+    host.send({"type": "bridge-command", "cmd": "set-config", "asTextSource": "translation"})
+    pump()
+    _, src = query_host_config()
+    check(src == 'translation', "set-config 后 asTextSource = translation (实际: %s)" % str(src))
+
+    # 4. 验证 metadata 中的 asText 随配置变化
+    # 注意：本地程序只接收 bridge 预处理后的 lyrics 字段。
+    # 测试直接发 track，需模拟 bridge 预处理逻辑（按当前 host 配置）。
+
+    def strip_lrc(text):
+        import re
+        return re.sub(r'\s*\[[^\]]*\]\s*', '', text).strip()
+
+    # 当前 host 配置：lrc + translation -> 预期 lyrics = 原始翻译（带时间戳）
+    host.send(
+        {
+            "type": "track",
+            "track": {
+                "id": "CFG123",
+                "title": "测试",
+                "artists": ["歌手"],
+                "lyrics": "[00:01.00]翻译第一行\n[00:02.00]翻译第二行",
+            },
+            "duration": 100.0,
+            "position": 0.0,
+            "status": "Playing",
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(
+        str(metadata.get("xesam:asText", "")) == "[00:01.00]翻译第一行\n[00:02.00]翻译第二行",
+        "asText=translation+lrc 时输出带时间戳的翻译 (实际: %s)" % str(metadata.get("xesam:asText", ""))
+    )
+
+    # 5. 切回 plain + original
+    host.send({"type": "bridge-command", "cmd": "set-config", "asTextFormat": "plain", "asTextSource": "original"})
+    pump()
+    # 再推一次 track，模拟 bridge 按新配置预处理（plain + original -> 去时间戳的原文）
+    host.send(
+        {
+            "type": "track",
+            "track": {
+                "id": "CFG123",
+                "title": "测试",
+                "artists": ["歌手"],
+                "lyrics": "原文第一行\n原文第二行",
+            },
+            "duration": 100.0,
+            "position": 0.0,
+            "status": "Playing",
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(
+        str(metadata.get("xesam:asText", "")) == "原文第一行\n原文第二行",
+        "asText=original+plain 时输出纯文本原文 (实际: %s)" % str(metadata.get("xesam:asText", ""))
+    )
+
     position1 = int(props.Get(IFACE_PLAYER, "Position"))
     time.sleep(0.3)
     position2 = int(props.Get(IFACE_PLAYER, "Position"))

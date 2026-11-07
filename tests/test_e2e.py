@@ -194,6 +194,120 @@ def run():
     check("moekoe:lyrics" not in metadata, "Metadata 不含私有歌词键")
     check("moekoe:translation" not in metadata, "Metadata 不含私有译文键")
 
+    # ---------------- 歌词晚到：xesam:asText / xesam:lyricist ----------------
+    print("\n[歌词元数据]")
+    harness.push(
+        {
+            "type": "lyrics",
+            "data": {
+                "currentTime": 2.0,
+                "duration": 200.0,
+                "lyricsData": "[00:01.00]第一行\n[00:02.00]第二行\n",
+                "lyricist": "作词者A、作词者B",
+                "currentSong": {
+                    "hash": "ABC123",
+                    "name": "うぉーたーりょー",
+                    "author": "まふまふ",
+                    "albumname": "アコースティック",
+                    "img": "https://example.com/cover.jpg",
+                    "url": "https://example.com/song.mp3",
+                },
+            },
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    actual = str(metadata.get("xesam:asText", ""))
+    print(f"DEBUG: xesam:asText = {repr(actual)}")
+    check(actual.strip() == "[00:01.00]第一行\n[00:02.00]第二行".strip().strip(),
+          "xesam:asText 携带带时间标签的 LRC 歌词全文")
+    check(
+        [str(item) for item in metadata.get("xesam:lyricist", [])] == ["作词者A", "作词者B"],
+        "xesam:lyricist 携带作词人列表",
+    )
+    check("moekoe:lyrics" not in metadata, "歌词仍不以私有键暴露")
+
+    # ---------------- asTextFormat/asTextSource 切换（通过 bridge 实时生效） ----------------
+    print("\n[xesam:asText 格式与来源切换]")
+    # 1. 默认 lrc + original -> xesam:asText 是带时间戳的 LRC（来自桥接页预处理）
+    status = harness.request_status()
+    print(f"DEBUG: status = {status}")
+    check(status.get("asTextFormat") == 'lrc', "默认 asTextFormat = lrc")
+    check(status.get("asTextSource") == 'original', "默认 asTextSource = original")
+
+    # 2. 推送带翻译的歌词（模拟 MoeKoe 推送 lyrics 消息，含 lyrics 和 translation）
+    harness.push(
+        {
+            "type": "lyrics",
+            "data": {
+                "currentTime": 3.0,
+                "duration": 200.0,
+                "lyricsData": "[00:01.00]原文A\n[00:02.00]原文B\n",
+                "translation": "[00:01.00]翻译A\n[00:02.00]翻译B\n",
+                "lyricist": "作词者C",
+                "currentSong": {
+                    "hash": "ABC123",
+                    "name": "うぉーたーりょー",
+                    "author": "まふまふ",
+                    "albumname": "アコースティック",
+                    "img": "https://example.com/cover.jpg",
+                    "url": "https://example.com/song.mp3",
+                },
+            },
+        }
+    )
+    pump()
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(str(metadata.get("xesam:asText", "")) == "[00:01.00]原文A\n[00:02.00]原文B",
+          "默认 lrc+original -> 带时间戳原文")
+
+    # 3. 通过 bridge-command 切换为 lrc（保留原文来源）
+    harness.send({
+        "toHost": {
+            "type": "bridge-command",
+            "cmd": "set-config",
+            "asTextFormat": "lrc",
+            "asTextSource": "original"
+        }
+    })
+    pump(0.8)
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(str(metadata.get("xesam:asText", "")) == "[00:01.00]原文A\n[00:02.00]原文B",
+          "lrc+original -> 带时间戳原文")
+
+    # 4. 切换为 translation + plain
+    harness.send({
+        "toHost": {
+            "type": "bridge-command",
+            "cmd": "set-config",
+            "asTextFormat": "plain",
+            "asTextSource": "translation"
+        }
+    })
+    pump(0.8)
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(str(metadata.get("xesam:asText", "")) == "翻译A\n翻译B",
+          "plain+translation -> 纯文本翻译")
+
+    # 5. 切换为 translation + lrc
+    harness.send({
+        "toHost": {
+            "type": "bridge-command",
+            "cmd": "set-config",
+            "asTextFormat": "lrc",
+            "asTextSource": "translation"
+        }
+    })
+    pump(0.8)
+    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
+    check(str(metadata.get("xesam:asText", "")) == "[00:01.00]翻译A\n[00:02.00]翻译B",
+          "lrc+translation -> 带时间戳翻译")
+
+    # 6. 验证配置回传
+    status = harness.request_status()
+    check(status.get("asTextFormat") == 'lrc', "配置回传 asTextFormat = lrc")
+    check(status.get("asTextSource") == 'translation', "配置回传 asTextSource = translation")
+
     # ---------------- 合并状态（弹窗刷新回执） ----------------
     print("\n[合并状态]")
     harness.status = None
@@ -210,11 +324,17 @@ def run():
         check("overlay" not in status, "合并状态不含私有 overlay 字段")
         check("lineCount" not in status, "合并状态不含歌词行数字段")
         check("lineIndex" not in status, "合并状态不含歌词行号字段")
-
+    pump(0.5)  # 更长一点，确保所有 set-config 广播都被处理完
     # ---------------- 指令中继（会重建 WS，放在状态查询之后） ----------------
     print("\n[指令中继]")
     harness.send({"toHost": {"type": "bridge-command", "cmd": "reconnect"}})
-    relayed = harness.wait_host_message("bridge-command")
+    # 等待特定的 reconnect bridge-command，忽略之前的 set-config
+    relayed = None
+    for _ in range(10):
+        msg = harness.wait_host_message("bridge-command", timeout=0.5)
+        if msg and msg.get("cmd") == "reconnect":
+            relayed = msg
+            break
     check(relayed is not None and str(relayed.get("cmd")) == "reconnect",
           "bridge-command 原样广播回 stdout")
 

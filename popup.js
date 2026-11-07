@@ -10,8 +10,51 @@ const HOST_ID = 'mpris-host';
 
 const state = {
   live: null,
-  host: null
+  host: null,
+  asTextFormat: 'lrc',
+  asTextSource: 'original'
 };
+
+// 默认配置
+const DEFAULT_CONFIG = {
+  asTextFormat: 'lrc',
+  asTextSource: 'original'
+};
+
+// 从 storage 加载配置
+function loadConfig() {
+  return new Promise(function (resolve) {
+    if (!window.chrome || !chrome.storage || !chrome.storage.local) {
+      resolve(DEFAULT_CONFIG);
+      return;
+    }
+    chrome.storage.local.get(['asTextFormat', 'asTextSource'], function (items) {
+      resolve({
+        asTextFormat: items.asTextFormat || DEFAULT_CONFIG.asTextFormat,
+        asTextSource: items.asTextSource || DEFAULT_CONFIG.asTextSource
+      });
+    });
+  });
+}
+
+// 保存配置到 storage 并推送到 host
+function saveConfig(config) {
+  if (window.chrome && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.set(config, function () {
+      // 忽略存储错误
+    });
+  }
+  // 实时推送到 host
+  hostSend({
+    type: 'bridge-command',
+    cmd: 'set-config',
+    asTextFormat: config.asTextFormat,
+    asTextSource: config.asTextSource
+  }).then(function () {
+    // 配置已推送，刷新状态回执
+    refresh();
+  });
+}
 
 function $(id) {
   return document.getElementById(id);
@@ -68,14 +111,66 @@ function listenHost() {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'status' && message.status && typeof message.status === 'object') {
       applyLiveStatus(message.status);
+    } else if (message.type === 'fix-launcher-result' || message.type === 'unfix-launcher-result') {
+      showLauncherResult(message);
     } else if (message.type === 'ready' || message.type === 'bye' || message.type === 'error') {
       setTimeout(refresh, 50);  // 宿主生命周期变化 → 重拉一次合并状态
     }
   });
 }
 
+/* ---------------- 防重复注册自动修复 ---------------- */
+
+var fixLauncherTimer = null;
+var unfixLauncherTimer = null;
+
+var LAUNCHER_BUTTONS = {
+  'fix-launcher': { idle: '自动修复启动项', busy: '修复中…' },
+  'unfix-launcher': { idle: '撤销修复（卸载前必点）', busy: '撤销中…' }
+};
+
+function showLauncherResult(result) {
+  if (fixLauncherTimer) {
+    clearTimeout(fixLauncherTimer);
+    fixLauncherTimer = null;
+  }
+  if (unfixLauncherTimer) {
+    clearTimeout(unfixLauncherTimer);
+    unfixLauncherTimer = null;
+  }
+  // 回执不区分来源按钮，统一复位
+  Object.keys(LAUNCHER_BUTTONS).forEach(function (id) {
+    var button = $(id);
+    button.disabled = false;
+    button.textContent = LAUNCHER_BUTTONS[id].idle;
+  });
+  var element = $('fix-launcher-result');
+  element.hidden = false;
+  var ok = !!result.ok;
+  element.textContent = result.message || (ok ? '完成' : '失败');
+  element.className = 'tip fix-result ' + (ok ? 'ok' : 'bad');
+}
+
+function runLauncherCommand(cmd, buttonId, timerKey, timeoutMessage) {
+  var button = $(buttonId);
+  button.disabled = true;
+  button.textContent = LAUNCHER_BUTTONS[buttonId].busy;
+  hostSend({ type: 'bridge-command', cmd: cmd });
+  // 本地程序未运行时不会收到回执，超时兜底提示
+  var timer = setTimeout(function () {
+    if (timerKey === 'fix') fixLauncherTimer = null; else unfixLauncherTimer = null;
+    if (button.disabled) {
+      showLauncherResult({ ok: false, message: timeoutMessage });
+    }
+  }, 4000);
+  if (timerKey === 'fix') fixLauncherTimer = timer; else unfixLauncherTimer = timer;
+}
+
 function applyLiveStatus(status) {
   state.live = status;
+  // 从宿主回执更新配置（启动时/重连时同步）
+  if (typeof status.asTextFormat === 'string') state.asTextFormat = status.asTextFormat;
+  if (typeof status.asTextSource === 'string') state.asTextSource = status.asTextSource;
   render();
 }
 
@@ -153,6 +248,18 @@ function render() {
   } else {
     notice('');
   }
+
+  /* 歌词传输配置按钮 */
+  var formatButtons = document.querySelectorAll('#format-modes button');
+  Array.prototype.forEach.call(formatButtons, function (button) {
+    var active = button.dataset.format === state.asTextFormat;
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  var sourceButtons = document.querySelectorAll('#source-modes button');
+  Array.prototype.forEach.call(sourceButtons, function (button) {
+    var active = button.dataset.source === state.asTextSource;
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
 }
 
 /* ---------------- 刷新 ---------------- */
@@ -175,9 +282,56 @@ function bind() {
     hostSend({ type: 'bridge-command', cmd: 'push-all' }).then(refresh);
   });
   $('refresh').addEventListener('click', refresh);
+
+  // 格式选择
+  document.querySelectorAll('#format-modes button').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var format = button.dataset.format;
+      if (format !== state.asTextFormat) {
+        state.asTextFormat = format;
+        saveConfig({ asTextFormat: format, asTextSource: state.asTextSource });
+      }
+    });
+  });
+
+  // 来源选择
+  document.querySelectorAll('#source-modes button').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var source = button.dataset.source;
+      if (source !== state.asTextSource) {
+        state.asTextSource = source;
+        saveConfig({ asTextFormat: state.asTextFormat, asTextSource: source });
+      }
+    });
+  });
+
+  // 防重复注册：自动生成带 flag 的启动包装
+  $('fix-launcher').addEventListener('click', function () {
+    runLauncherCommand(
+      'fix-launcher',
+      'fix-launcher',
+      'fix',
+      '没有收到本地程序回执：请先确认 mpris-host 正在运行（看上方 D-Bus 状态）'
+    );
+  });
+
+  // 卸载前清理：删除插件生成的启动包装与菜单覆盖
+  $('unfix-launcher').addEventListener('click', function () {
+    runLauncherCommand(
+      'unfix-launcher',
+      'unfix-launcher',
+      'unfix',
+      '没有收到本地程序回执：请先确认 mpris-host 正在运行（看上方 D-Bus 状态）'
+    );
+  });
 }
 
-listenHost();
-bind();
-render();
-refresh();
+// 启动：加载配置并初始化
+loadConfig().then(function (config) {
+  state.asTextFormat = config.asTextFormat;
+  state.asTextSource = config.asTextSource;
+  listenHost();
+  bind();
+  render();
+  refresh();
+});

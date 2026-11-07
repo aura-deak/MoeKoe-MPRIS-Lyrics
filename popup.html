@@ -14,38 +14,95 @@
     </div>
   </header>
 
-  <section>
-    <h2>连接状态</h2>
-    <ul class="status" id="status-list">
-      <li><span>D-Bus</span><b id="dbus-state">检测中…</b></li>
-      <li><span>MoeKoe API</span><b id="ws-state">检测中…</b></li>
-      <li><span>曲目</span><b id="track-state">—</b></li>
-      <li><span>进度</span><b id="position-state">—</b></li>
-    </ul>
-    <p class="notice" id="notice" hidden></p>
-  </section>
+  <div class="layout">
+    <div class="col-main">
+      <section>
+        <h2>连接状态</h2>
+        <ul class="status" id="status-list">
+          <li><span>D-Bus</span><b id="dbus-state">检测中…</b></li>
+          <li><span>MoeKoe API</span><b id="ws-state">检测中…</b></li>
+          <li><span>曲目</span><b id="track-state">—</b></li>
+          <li><span>进度</span><b id="position-state">—</b></li>
+        </ul>
+        <p class="notice" id="notice" hidden></p>
+      </section>
 
-  <section class="troubleshoot">
-    <h2>运行异常排查</h2>
-    <p class="tip">状态不对时按下面顺序排查</p>
-    <h3>1. 安装依赖</h3>
-    <b>Debian / Ubuntu</b>
-    <pre class="command">sudo apt install python3-dbus python3-gi</pre>
-    <b>Arch / CachyOS</b>
-    <pre class="command">sudo pacman -S python-dbus python-gobject</pre>
+      <section>
+        <h2>歌词传输配置</h2>
+        <p class="tip">设置即时写入后端并持久化，MPRIS 元数据实时生效（需当前有播放曲目）。</p>
 
-    <h3>2. 补上可执行位</h3>
-    <p>若是从商城安装：</p>
-    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/MoeKoe-MPRIS-Lyrics-*/bin/mpris-host</pre>
-    <p>若是从压缩包安装：</p>
-    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host</pre>
-    <h3>3. 还不行</h3>
-    <ul class="help">
-      <li>在 设置 → 插件 → 插件管理 里确认已授权本地程序 <code>mpris-host</code>。</li>
-      <li>确认 MoeKoe 已开启「API 模式」（默认 <code>127.0.0.1:6520</code>）。</li>
-      <li>点下方「重新连接」和「刷新」，或完全退出并重启 MoeKoe。</li>
-    </ul>
-  </section>
+        <div class="config-group">
+          <h3>xesam:asText 格式</h3>
+          <div class="modes" id="format-modes" role="radiogroup" aria-label="xesam:asText 格式">
+            <button type="button" data-format="plain" role="radio">
+              <strong>纯文本</strong>
+              <span>去掉时间戳，仅歌词内容</span>
+            </button>
+            <button type="button" data-format="lrc" role="radio">
+              <strong>LRC 格式</strong>
+              <span>保留 [mm:ss.xx] 时间标签</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="config-group">
+          <h3>歌词来源</h3>
+          <div class="modes" id="source-modes" role="radiogroup" aria-label="歌词来源">
+            <button type="button" data-source="original" role="radio">
+              <strong>原文</strong>
+              <span>使用原文歌词</span>
+            </button>
+            <button type="button" data-source="translation" role="radio">
+              <strong>翻译</strong>
+              <span>使用翻译歌词（如有）</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <aside class="col-side">
+      <section class="duo">
+        <h2>防重复注册</h2>
+        <p class="tip">Electron 内核会额外注册一个 <code>chromium.instance*</code> MPRIS 接口，抢在扩展前面且不带歌词，导致歌词组件选错播放器。点击自动创建带 <code>--disable-features=MediaSessionService</code> 的启动包装。</p>
+        <p class="tip warn"><b>卸载本插件前，请务必先点「撤销修复」</b>，否则启动包装和菜单覆盖会残留并持续生效。</p>
+        <button type="button" id="fix-launcher" class="duo-btn">自动修复启动项</button>
+        <button type="button" id="unfix-launcher" class="duo-btn subtle">撤销修复（卸载前必点）</button>
+        <p class="tip fix-result" id="fix-launcher-result" hidden></p>
+      </section>
+
+      <section class="duo star">
+        <h2>支持作者</h2>
+        <p class="tip">能给个 star 吗？谢谢！这有助于帮助作者估计真实用户量，并鼓励作者。</p>
+        <a class="duo-btn github" href="https://github.com/aura-deak/MoeKoe-MPRIS-Lyrics" target="_blank" rel="noopener">
+          <span>★ GitHub 仓库</span>
+          <span class="sub">aura-deak/MoeKoe-MPRIS-Lyrics</span>
+        </a>
+      </section>
+    </aside>
+
+    <section class="troubleshoot span-all">
+      <h2>运行异常排查</h2>
+      <p class="tip">状态不对时按下面顺序排查</p>
+      <h3>1. 安装依赖</h3>
+      <b>Debian / Ubuntu</b>
+      <pre class="command">sudo apt install python3-dbus python3-gi</pre>
+      <b>Arch / CachyOS</b>
+      <pre class="command">sudo pacman -S python-dbus python-gobject</pre>
+
+      <h3>2. 补上可执行位</h3>
+      <p>若是从商城安装：</p>
+      <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/MoeKoe-MPRIS-Lyrics-*/bin/mpris-host</pre>
+      <p>若是从压缩包安装：</p>
+      <pre class="command">chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host</pre>
+      <h3>3. 还不行</h3>
+      <ul class="help">
+        <li>在 设置 → 插件 → 插件管理 里确认已授权本地程序 <code>mpris-host</code>。</li>
+        <li>确认 MoeKoe 已开启「API 模式」（默认 <code>127.0.0.1:6520</code>）。</li>
+        <li>点下方「重新连接」和「刷新」，或完全退出并重启 MoeKoe。</li>
+      </ul>
+    </section>
+  </div>
 
   <footer>
     <button type="button" id="reconnect">重新连接</button>

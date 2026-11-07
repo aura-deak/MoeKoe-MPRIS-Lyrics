@@ -54,10 +54,29 @@ sudo pacman -S python-dbus python-gobject
 
 ---
 
+## 卸载
+
+> ⚠️ **卸载前必须先运行「撤销修复」**：如果用过弹窗里的「自动修复启动项」，
+> 插件会生成 `~/.local/bin/moekoemusic` 启动包装，并覆盖应用菜单启动项
+> （`~/.local/share/applications/moekoemusic.desktop`）。直接移除插件会让这些改动
+> 残留并持续生效。正确顺序：
+>
+> 1. 打开插件弹窗，点 **「撤销修复（卸载前必点）」**；
+> 2. 确认提示显示「撤销完成」；
+> 3. 再到 **设置 → 插件** 移除本插件。
+>
+> 「撤销修复」只清理本插件生成的内容（启动包装与菜单覆盖），不会碰其他文件；
+> 若当时没点撤销，也可手动 `rm ~/.local/bin/moekoemusic` 并删除
+> `~/.local/share/applications/` 下 Exec 指向它的同名 `.desktop`。
+
+---
+
 ## 插件弹窗
 
 - **连接状态**：D-Bus 注册状态、MoeKoe API 连接状态、当前曲目与进度
 - **立即同步 / 重新连接 / 刷新**：强制重推数据、重连 API、拉取一次合并状态
+- **防重复注册**：一键创建/撤销带 `--disable-features=MediaSessionService` 的启动包装（卸载前必须撤销，见「卸载」一节）
+- **支持作者**：GitHub 仓库入口
 
 弹窗不做后台轮询：打开时拉一次合并状态，之后点「刷新」按需更新。
 
@@ -110,8 +129,10 @@ MoeKoe Music (Electron)
          └─→ 会话总线 → playerctl / KDE 媒体组件等
 ```
 
-MoeKoe 推送的 `lyrics` 消息只用来取曲目与进度；插件不解析歌词，也不暴露任何
-私有 D-Bus 接口，只做标准 MPRIS 桥接。
+MoeKoe 推送的 `lyrics` 消息既用来取曲目与进度，也用来填充标准 Xesam 歌词元数据：
+`xesam:asText`（歌词全文）与 `xesam:lyricist`（作词人）。歌词以纯文本形式放进
+MPRIS 元数据，供支持这些字段的桌面媒体组件（如部分 KDE / GNOME 控件）读取。
+插件不暴露任何私有 D-Bus 接口，只做标准 MPRIS 桥接。
 
 ---
 
@@ -147,11 +168,14 @@ moekoe-mpris/
 | `status` | `isPlaying`、`position`，可选 `snapshot` | 播放状态与进度；`snapshot` 为桥接页自述状态 |
 | `position` | `position` | 仅进度校正 |
 | `status-request` | — | 返回一条合并后的 `status`（宿主 + 桥接页快照） |
-| `bridge-command` | `cmd`（`reconnect` / `push-all`） | 转发给桥接页执行 |
+| `bridge-command` | `cmd`（`reconnect` / `push-all` / `set-config` / `fix-launcher` / `unfix-launcher`） | `reconnect` / `push-all` 转发给桥接页；`set-config` 更新歌词配置；`fix-launcher` / `unfix-launcher` 由本地程序直接处理（启动包装的创建与撤销） |
 | `ping` | — | 心跳 |
 
 出站（stdout，JSON Lines，单条 < 64KB）：`ready` / `pong` / `error` / `bye` /
-`status` / `bridge-command` / `control`。日志只写 stderr，不会污染协议。
+`status` / `bridge-command` / `control` / `fix-launcher-result` /
+`unfix-launcher-result`。日志只写 stderr，不会污染协议。
+
+> 每条出站消息都必须带 `type` 字段：弹窗按 `message.type` 分派，缺了会静默超时。
 
 ---
 
