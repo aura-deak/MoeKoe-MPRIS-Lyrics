@@ -6,9 +6,14 @@ name: Notify plugin publish
 # https://github.com/MoeKoeMusic/MoeKoeMusic-Plugins
 # 提交一条符合模板格式的上架/更新 issue，正文附 Release 说明。
 #
-# 权限说明：GITHUB_TOKEN 只能访问本仓库，向其他仓库发 issue 必须用
-# 具有公开仓库 issue 写权限的 PAT，存到本仓库 Secrets：
-#   PLUGINS_ISSUE_TOKEN = <personal access token>
+# 权限说明：GITHUB_TOKEN 只能访问本仓库，向其他仓库发 issue 必须用 PAT，
+# 存到本仓库 Secrets：
+#   PLUGINS_ISSUE_TOKEN = <classic PAT，仅勾 public_repo scope>
+#
+# 注意：必须用 classic PAT（classic personal access token）。
+# fine-grained PAT 无法对「你不是其成员的公开仓库」授予写权限
+# （GitHub 已将其列为 fine-grained token 的已知限制），
+# 因此拿 fine-grained token 调 POST /repos/{owner}/{repo}/issues 会 403。
 #
 # 也可在 Actions 页面手动触发（补发某个 Release 的通知）。
 
