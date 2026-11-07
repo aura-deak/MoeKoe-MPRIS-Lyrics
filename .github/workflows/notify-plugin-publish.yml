@@ -1,0 +1,135 @@
+name: Notify plugin publish
+
+# 触发时机：本仓库发布（publish）一个 Release 时，自动按照
+# MoeKoeMusic-Plugins 仓库的「📦 上架插件」issue 表单模板
+# （.github/ISSUE_TEMPLATE/plugin_publish.yml），向
+# https://github.com/MoeKoeMusic/MoeKoeMusic-Plugins
+# 提交一条符合模板格式的上架/更新 issue，正文附 Release 说明。
+#
+# 权限说明：GITHUB_TOKEN 只能访问本仓库，向其他仓库发 issue 必须用
+# 具有公开仓库 issue 写权限的 PAT，存到本仓库 Secrets：
+#   PLUGINS_ISSUE_TOKEN = <personal access token>
+#
+# 也可在 Actions 页面手动触发（补发某个 Release 的通知）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 目标 Release 的 tag（手动触发时必填，如 v1.3.0）
+        required: true
+      operation_type:
+        description: 操作类型（留空则自动判断：无历史 issue 视为新上架）
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: MoeKoeMusic/MoeKoeMusic-Plugins
+  SOURCE_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+
+jobs:
+  create-publish-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查 Token
+        run: |
+          if [ -z "${{ secrets.PLUGINS_ISSUE_TOKEN }}" ]; then
+            echo "::error::未配置 Secret PLUGINS_ISSUE_TOKEN，无法向 ${{ env.TARGET_REPO }} 发 issue"
+            echo "::error::请在本仓库 Settings → Secrets and variables → Actions 中添加具有公开仓库 issue 权限的 PAT"
+            exit 1
+          fi
+
+      - name: 获取 Release 信息
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          # toJSON 输出 JSON 字面量，经 env 传入再用 jq 解码，
+          # 避免 Release 正文含引号/反引号时被 shell 解释
+          RELEASE_BODY_JSON: ${{ toJSON(github.event.release.body) }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::error::未指定 Release tag"; exit 1
+          fi
+          BODY="$(printf '%s' "$RELEASE_BODY_JSON" | jq -r '.')"
+          if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
+            BODY="$(gh release view "$TAG" --json body -q .body)"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          # Release 正文写入文件，避免 shell 注入/转义问题；
+          # 命令替换会吞尾部换行，这里补一个保证正文与下一节之间有空行
+          printf '%s\n' "$BODY" > release-body.md
+          echo "release body: $(wc -c < release-body.md) bytes"
+
+      - name: 判断操作类型（新上架 / 更新插件）
+        env:
+          GH_TOKEN: ${{ secrets.PLUGINS_ISSUE_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          INPUT_OP: ${{ github.event.inputs.operation_type }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_OP" ]; then
+            OP="$INPUT_OP"
+          else
+            # 在目标仓库搜是否已有本插件的上架 issue（按仓库名搜标题）
+            COUNT=$(gh issue list -R "$TARGET_REPO" --search "$REPO_NAME in:title" --state all --json number -q length 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              OP="更新插件"
+            else
+              OP="新上架"
+            fi
+          fi
+          echo "OPERATION_TYPE=$OP" >> "$GITHUB_ENV"
+          echo "操作类型: $OP"
+
+      - name: 组装模板化 issue 正文
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          # 严格对应 plugin_publish.yml 表单字段：
+          #   operation_type / repository_url / build_required / extra_notes /
+          #   confirmations（标题即字段 label，GitHub 表单提交后就是这个格式）
+          {
+            echo "### 操作类型"
+            echo
+            echo "$OPERATION_TYPE"
+            echo
+            echo "### GitHub 仓库地址"
+            echo
+            echo "$SOURCE_REPO_URL"
+            echo
+            echo "### 安装前是否需要编译"
+            echo
+            echo "否，整个仓库可直接作为插件包安装"
+            echo
+            echo "### 补充说明"
+            echo
+            echo "Release [$TAG]($SOURCE_REPO_URL/releases/tag/$TAG) 更新内容："
+            echo
+            cat release-body.md
+            echo
+            echo "### 提交确认"
+            echo
+            echo "- [X] 我确认我是该插件作者或已获得作者明确授权提交"
+            echo "- [X] 我确认该版本通过了基本功能自测，且描述信息真实有效"
+          } > issue-body.md
+          echo "---- issue body ----"
+          cat issue-body.md
+
+      - name: 创建上架 issue
+        env:
+          GH_TOKEN: ${{ secrets.PLUGINS_ISSUE_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          gh issue create \
+            -R "$TARGET_REPO" \
+            --title "[Plugin]: $OPERATION_TYPE $REPO_NAME $TAG" \
+            --label "plugin,publish" \
+            --body-file issue-body.md
