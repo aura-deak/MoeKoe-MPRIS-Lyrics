@@ -10,12 +10,9 @@
     <img src="icons/icon48.png" alt="">
     <div>
       <h1>MoeKoe MPRIS</h1>
-      <p id="platform-tip">Linux 桌面歌词与播放状态传输</p>
+      <p id="platform-tip">Linux 桌面播放状态桥接</p>
     </div>
   </header>
-
-  <div class="layout">
-    <div class="col col-main">
 
   <section>
     <h2>连接状态</h2>
@@ -28,107 +25,20 @@
     <p class="notice" id="notice" hidden></p>
   </section>
 
-  <section>
-    <h2>歌词传输模式</h2>
-    <div class="modes" id="modes" role="radiogroup" aria-label="歌词传输模式">
-      <button type="button" data-mode="original" role="radio">
-        <strong>单歌词</strong>
-        <span>只传原文</span>
-      </button>
-      <button type="button" data-mode="translation" role="radio">
-        <strong>单翻译</strong>
-        <span>只传译文</span>
-      </button>
-      <button type="button" data-mode="both" role="radio">
-        <strong>歌词翻译</strong>
-        <span>原文 + 译文</span>
-      </button>
-    </div>
-    <p class="tip mode-tip" data-mode="original" hidden>单歌词：MPRIS 侧只出现原文，Metadata 键 <code>moekoe:lyrics</code> 与信号字段 <code>text</code>。</p>
-    <p class="tip mode-tip" data-mode="translation" hidden>单翻译：MPRIS 侧只出现译文，Metadata 键 <code>moekoe:translation</code> 与信号字段 <code>translation</code>。</p>
-    <p class="tip mode-tip" data-mode="both" hidden>歌词翻译：原文与译文同时传输，<code>moekoe:lyrics</code> 与 <code>moekoe:translation</code> 都会出现。</p>
-  </section>
-
-  <section class="grow">
-    <h2>悬浮歌词显示</h2>
-    <label class="switch-row">
-      <span>总开关</span>
-      <input type="checkbox" id="overlay-enabled">
-    </label>
-    <label class="switch-row">
-      <span>鼠标穿透</span>
-      <input type="checkbox" id="overlay-click-through">
-    </label>
-    <div class="setting-row">
-      <span>背景透明度</span>
-      <input type="range" id="overlay-opacity" min="0" max="100" step="5" value="62">
-      <b id="overlay-opacity-value">62%</b>
-    </div>
-    <div class="setting-row">
-      <span>显示位置</span>
-      <select id="overlay-position">
-        <option value="bottom-center">底部居中</option>
-        <option value="bottom-left">左下角</option>
-        <option value="bottom-right">右下角</option>
-        <option value="top-center">顶部居中</option>
-        <option value="top-left">左上角</option>
-        <option value="top-right">右上角</option>
-        <option value="custom" disabled>自定义（拖动设置）</option>
-      </select>
-    </div>
-    <div class="setting-row">
-      <span>缩放</span>
-      <input type="range" id="overlay-scale" min="50" max="200" step="10" value="100">
-      <b id="overlay-scale-value">100%</b>
-    </div>
-    <div class="setting-row">
-      <span>重启悬浮歌词</span>
-      <button type="button" id="overlay-restart">立即重启</button>
-    </div>
-    <p class="tip">设置即时写入后端并持久化，悬浮窗实时生效。</p>
-  </section>
-
-    </div>
-    <div class="col">
-
-  <section class="grow">
-    <h2>悬浮歌词操作说明</h2>
-    <ul class="help">
-      <li>关闭「鼠标穿透」后可直接<b>拖动悬浮文字</b>调整位置，松手自动保存（位置变为「自定义」）。</li>
-      <li>开启「鼠标穿透」后悬浮窗不接收鼠标点击，<b>点击桌面托盘里的悬浮歌词图标即可关闭</b>；也可关闭穿透，再在悬浮文字上右键 → 退出。</li>
-      <li>当前歌词为「纯音乐，请欣赏」时，悬浮窗自动隐藏不显示。</li>
-      <li>改动显示设置后若悬浮窗没有及时更新，可点上方「立即重启」重新加载；完全退出并重启 MoeKoe 也能达到同样效果。</li>
-      <li>曲目信息需<b>先播放一次</b>才会推送；暂停期间不再刷新进度，位置以最后一次校正为准。</li>
-      <li>歌词来源是 MoeKoe 自己（含酷狗翻译），不联网取词；纯音乐行会按模式投影出「（本行无译文）」占位。</li>
-      <li>悬浮窗基于 wlr-layer-shell，兼容 niri、Hyprland、Sway 等合成器；X11 会话不可用。</li>
-      <li>悬浮歌词客户端由插件自动拉起，设 <code>MOEKOE_MPRIS_NO_OVERLAY=1</code> 可禁用。</li>
-    </ul>
-  </section>
-
-  <section>
-    <h2>传输预览</h2>
-    <div class="preview" id="preview">
-      <p class="source" id="preview-source">—</p>
-      <p class="line-text" id="preview-text">等待歌词数据…</p>
-      <p class="line-translation" id="preview-translation"></p>
-    </div>
-    <p class="tip">预览按当前传输模式投影，与推到 D-Bus 的内容一致。</p>
-  </section>
-
-    </div>
-    <div class="col">
-
-  <section class="troubleshoot grow">
+  <section class="troubleshoot">
     <h2>运行异常排查</h2>
-    <p class="tip">歌词不出、悬浮窗不出现时按下面顺序排查</p>
+    <p class="tip">状态不对时按下面顺序排查</p>
     <h3>1. 安装依赖</h3>
     <b>Debian / Ubuntu</b>
-    <pre class="command">sudo apt install python3-dbus python3-gi gir1.2-gtk-4.0</pre>
+    <pre class="command">sudo apt install python3-dbus python3-gi</pre>
     <b>Arch / CachyOS</b>
-    <pre class="command">sudo pacman -S python-dbus python-gobject gtk4 gtk4-layer-shell</pre>
+    <pre class="command">sudo pacman -S python-dbus python-gobject</pre>
 
     <h3>2. 补上可执行位</h3>
+    <p>若是从商城安装：</p>
     <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/MoeKoe-MPRIS-Lyrics-*/bin/mpris-host</pre>
+    <p>若是从压缩包安装：</p>
+    <pre class="command" id="chmod-command">chmod +x ~/.config/moekoemusic/extensions/moekoe-mpris/bin/mpris-host</pre>
     <h3>3. 还不行</h3>
     <ul class="help">
       <li>在 设置 → 插件 → 插件管理 里确认已授权本地程序 <code>mpris-host</code>。</li>
@@ -137,16 +47,12 @@
     </ul>
   </section>
 
-    </div>
-  </div>
-
   <footer>
     <button type="button" id="reconnect">重新连接</button>
     <button type="button" id="sync" class="primary">立即同步</button>
     <button type="button" id="refresh">刷新</button>
   </footer>
 
-  <script src="lyrics-parser.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

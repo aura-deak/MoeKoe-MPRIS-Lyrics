@@ -5,15 +5,10 @@
  *   MoeKoe WebSocket API (ws://127.0.0.1:6520, 需在设置中开启「API 模式」)
  *        │  lyrics / playerState
  *        ▼
- *   本桥接页：解析 KRC 歌词、定位当前行、维护曲目与播放状态
+ *   本桥接页：解析曲目与播放状态
  *        │  JSON Lines (window.electronAPI.nativeHost.send)
  *        ▼
- *   bin/mpris-host (Python)：按传输模式投影歌词，注册
- *        org.mpris.MediaPlayer2.MoeKoeMusic 到会话 D-Bus
- *
- * 传输模式与悬浮窗显示设置（开关/透明度/位置）由插件弹窗直连本地程序写入并
- * 持久化，桥接页只搬运播放数据；本地程序按设置投影后上总线，弹窗设置页再从
- * 本地程序回读状态（status-request 回执），保证设置页永远与后端一致。
+ *   bin/mpris-host (Python)：注册 org.mpris.MediaPlayer2.MoeKoeMusic 到会话 D-Bus
  */
 (function () {
   'use strict';
@@ -36,10 +31,6 @@
     duration: 0,
     position: 0,
     isPlaying: false,
-    lines: [],
-    lyricsHash: '',
-    lineIndex: -1,
-    format: 'none',
     sentCount: 0,
     lastPositionSentAt: 0,
     sendError: '',
@@ -48,14 +39,6 @@
   };
 
   /* ---------------- 工具 ---------------- */
-
-  function hashText(text) {
-    var hash = 5381;
-    for (var i = 0; i < text.length; i++) {
-      hash = ((hash << 5) + hash + text.charCodeAt(i)) >>> 0;
-    }
-    return hash + ':' + text.length;
-  }
 
   function splitArtists(value) {
     return String(value || '')
@@ -165,15 +148,6 @@
     });
   }
 
-  function pushLyrics() {
-    return send({ type: 'lyrics', lines: state.lines });
-  }
-
-  function pushLine() {
-    var line = state.lineIndex >= 0 ? state.lines[state.lineIndex] || null : null;
-    return send({ type: 'line', line: line });
-  }
-
   function pushStatus(force) {
     var now = Date.now();
     if (!force && now - state.lastPositionSentAt < POSITION_INTERVAL) return Promise.resolve({ success: true });
@@ -189,10 +163,7 @@
 
   /** 重连 / host 重启后把完整状态同步一次 */
   function pushAll() {
-    return pushTrack()
-      .then(pushLyrics)
-      .then(pushLine)
-      .then(function () { return pushStatus(true); });
+    return pushTrack().then(function () { return pushStatus(true); });
   }
 
   /* ---------------- 向 MoeKoe WebSocket 发送控制命令 ---------------- */
@@ -211,41 +182,6 @@
     } catch (error) {
       // 发送失败静默处理：控制权在用户手里，失败了再点一次即可
     }
-  }
-
-  /* ---------------- 歌词处理 ---------------- */
-
-  function applyLyrics(raw, trackChanged) {
-    if (typeof raw !== 'string' || !raw.trim()) {
-      if (!trackChanged && state.lines.length === 0) return;
-      state.lines = [];
-      state.format = 'none';
-      state.lyricsHash = '';
-      state.lineIndex = -1;
-      pushLyrics();
-      pushLine();
-      pushStatus(true);  // 清空歌词也是状态变化，快照保持新鲜
-      return;
-    }
-
-    var hash = hashText(raw);
-    if (hash === state.lyricsHash && !trackChanged) return;
-    state.lyricsHash = hash;
-
-    var parsed = MoeKoeLyrics.parse(raw);
-    state.lines = parsed.lines;
-    state.format = parsed.format;
-    pushLyrics();
-    pushStatus(true);  // 歌词行数变化，快照保持新鲜
-  }
-
-  /** 根据播放进度刷新当前行，行号变化时推送 line 消息 */
-  function refreshLine(force) {
-    var index = MoeKoeLyrics.findLineIndex(state.lines, state.position * 1000);
-    if (!force && index === state.lineIndex) return;
-    state.lineIndex = index;
-    pushLine();
-    pushStatus(true);  // 当前行变化，快照保持新鲜
   }
 
   /* ---------------- MoeKoe WebSocket ---------------- */
@@ -316,10 +252,6 @@
       state.track = normalizeTrack(song);
       state.duration = duration;
       state.position = position;
-      state.lines = [];
-      state.lyricsHash = '';
-      state.lineIndex = -1;
-      state.format = 'none';
       pushTrack();
     } else if (duration > 0 && Math.abs(duration - state.duration) > 0.5) {
       // 首帧时 audio.duration 可能尚未就绪，就绪后再同步一次 mpris:length
@@ -328,8 +260,6 @@
     }
 
     state.position = position;
-    applyLyrics(data.lyricsData, trackChanged);
-    refreshLine(trackChanged);
     pushStatus(trackChanged);
   }
 
@@ -338,7 +268,6 @@
     if (typeof data.isPlaying === 'boolean') state.isPlaying = data.isPlaying;
     if (typeof data.currentTime === 'number') state.position = data.currentTime;
 
-    refreshLine(false);
     pushStatus(statusChanged);
   }
 
@@ -385,14 +314,10 @@
       sendError: state.sendError,
       hint: state.hint,
       chmodCommand: state.chmodCommand,
-      format: state.format,
       track: state.track,
       duration: state.duration,
       position: state.position,
       isPlaying: state.isPlaying,
-      lineCount: state.lines.length,
-      lineIndex: state.lineIndex,
-      line: state.lineIndex >= 0 ? state.lines[state.lineIndex] || null : null,
       sentCount: state.sentCount
     };
   }

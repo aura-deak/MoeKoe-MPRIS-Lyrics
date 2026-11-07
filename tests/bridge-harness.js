@@ -3,14 +3,9 @@
  * 桥接页测试桩：在 Node 里以最小桩环境运行真实的 native-bridge.js，
  * 并把它的输出转发给真实的 bin/mpris-host（Python 本地程序）。
  *
- * 传输模式与显示配置（开关/透明度/位置/穿透）现在由弹窗直连本地程序写入，
- * 桥接页只搬运播放数据；因此这里也直接向本地程序发 mode / config / status-request。
- *
  * stdin（JSON Lines，测试进程驱动）：
  *   {"open":true}                  模拟 WebSocket 连接建立
  *   {"push":{"type":"lyrics",...}} 向桥接页推送 MoeKoe WS 消息
- *   {"setMode":"translation"}      模拟弹窗直连本地程序写模式
- *   {"setConfig":{...}}            模拟弹窗直连本地程序写显示配置
  *   {"toHost":{...}}               向本地程序直发任意消息
  *   {"status":true}                向本地程序请求合并状态
  *   {"quit":true}                  退出
@@ -161,7 +156,6 @@ window.electronAPI = {
   }
 };
 
-global.MoeKoeLyrics = require('../lyrics-parser.js');
 global.WebSocket = FakeWebSocket;
 
 require('../native-bridge.js');
@@ -203,18 +197,6 @@ async function handle(line) {
   if (command.push) {
     sockets.forEach((socket) => socket.emit(command.push));
     emit({ event: 'ack', for: 'push' });
-    return;
-  }
-
-  if (command.setMode) {
-    toHost({ type: 'mode', mode: String(command.setMode) });
-    emit({ event: 'ack', for: 'setMode', mode: command.setMode });
-    return;
-  }
-
-  if (command.setConfig) {
-    toHost(Object.assign({ type: 'config' }, command.setConfig));
-    emit({ event: 'ack', for: 'setConfig' });
     return;
   }
 

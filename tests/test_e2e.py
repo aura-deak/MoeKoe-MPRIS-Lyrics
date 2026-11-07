@@ -10,13 +10,11 @@ tests/bridge-harness.js 在 Node 中以桩环境运行真实桥接页，把消�
       D-Bus 上，不与正在运行的 MoeKoe 宿主抢名称）
 """
 
-import base64
 import json
 import os
 import queue
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -28,16 +26,9 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import privatebus  # noqa: E402
 
-# 测试不拉起悬浮歌词客户端，配置也写进临时目录，避免碰用户真实配置
-os.environ["MOEKOE_MPRIS_NO_OVERLAY"] = "1"
-CONFIG_DIR = tempfile.mkdtemp(prefix="moekoe-mpris-e2e-")
-os.environ["MOEKOE_MPRIS_CONFIG_DIR"] = CONFIG_DIR
-
 DBUS_NAME = "org.mpris.MediaPlayer2.MoeKoeMusic"
 PATH = "/org/mpris/MediaPlayer2"
 IFACE_PLAYER = "org.mpris.MediaPlayer2.Player"
-IFACE_LYRICS = "org.moekoe.MPRIS.Lyrics"
-IFACE_OVERLAY = "org.moekoe.MPRIS.Overlay"
 IFACE_PROPS = "org.freedesktop.DBus.Properties"
 
 failures = []
@@ -49,26 +40,6 @@ def check(condition, message):
     else:
         print("  FAIL %s" % message)
         failures.append(message)
-
-
-def build_krc():
-    """构造与酷狗 KRC 一致的样本：language 标签 + 行级时间标签 + 逐字标签。"""
-    language = {
-        "content": [
-            {"type": 1, "lyricContent": [["在水中"], ["抓住光芒"]]},
-            {"type": 0, "lyricContent": [["i no na ka de"], ["hi ko o tsu ka mu"]]},
-        ]
-    }
-    tag = base64.b64encode(json.dumps(language, ensure_ascii=False).encode("utf-8")).decode("ascii")
-    return "\n".join(
-        [
-            "[ar:まふまふ]",
-            "[language:%s]" % tag,
-            "[0,4000]<0,300,0>水<300,300,0>の<600,300,0>中<900,300,0>で",
-            "[4000,4000]<0,400,0>光<400,400,0>を<800,400,0>つかむ",
-            "[8000,2000]",
-        ]
-    )
 
 
 class Harness:
@@ -180,15 +151,6 @@ def run():
     check(wait_name(bus), "D-Bus 名称已注册")
 
     props = dbus.Interface(bus.get_object(DBUS_NAME, PATH), IFACE_PROPS)
-    overlay = dbus.Interface(bus.get_object(DBUS_NAME, PATH), IFACE_OVERLAY)
-    signals = []
-    bus.add_signal_receiver(
-        lambda line: signals.append(dict(line)),
-        signal_name="LineChanged",
-        dbus_interface=IFACE_LYRICS,
-        path=PATH,
-        bus_name=DBUS_NAME,
-    )
 
     def pump(duration=0.4):
         loop = GLib.MainLoop()
@@ -196,15 +158,13 @@ def run():
         loop.run()
 
     # ---------------- 推送 MoeKoe WS 消息 ----------------
-    print("\n[推送曲目与歌词]")
-    krc = build_krc()
+    print("\n[推送曲目]")
     harness.push(
         {
             "type": "lyrics",
             "data": {
                 "currentTime": 1.0,
                 "duration": 200.0,
-                "lyricsData": krc,
                 "currentSong": {
                     "hash": "ABC123",
                     "name": "うぉーたーりょー",
@@ -229,144 +189,10 @@ def run():
     check(str(metadata.get("xesam:album", "")) == "アコースティック",
           "xesam:album 上总线（albumname 字段兜底）")
     check(str(metadata.get("xesam:url", "")) == "https://example.com/song.mp3",
-          "xesam:url 上总线（供现有客户端查词识别）")
+          "xesam:url 上总线")
     check(str(props.Get(IFACE_PLAYER, "PlaybackStatus")) == "Playing", "PlaybackStatus = Playing")
-    check(str(metadata.get("moekoe:lyrics", "")) == "水の中で", "当前行原文（默认歌词翻译模式）")
-    check(str(metadata.get("moekoe:translation", "")) == "在水中", "当前行译文")
-
-    current = dict(props.Get(IFACE_LYRICS, "CurrentLine"))
-    check(int(current.get("index", -9)) == 0, "CurrentLine.index = 0")
-    lyrics_json = json.loads(str(props.Get(IFACE_LYRICS, "LyricsJson")))
-    check(len(lyrics_json) == 2, "LyricsJson 含 2 行（KRC 空行被忽略）")
-
-    # ---------------- 行切换 ----------------
-    print("\n[行切换]")
-    signals.clear()
-    harness.push(
-        {
-            "type": "lyrics",
-            "data": {
-                "currentTime": 5.0,
-                "duration": 200.0,
-                "lyricsData": krc,
-                "currentSong": {
-                    "hash": "ABC123",
-                    "name": "うぉーたーりょー",
-                    "author": "まふまふ",
-                    "album": "アコースティック",
-                    "img": "https://example.com/cover.jpg",
-                },
-            },
-        }
-    )
-    pump()
-    check(len(signals) == 1, "触发一次 LineChanged")
-    if signals:
-        check(str(signals[0].get("text", "")) == "光をつかむ", "信号携带第二行原文")
-        check(str(signals[0].get("translation", "")) == "抓住光芒", "信号携带第二行译文")
-        check(str(signals[0].get("mode", "")) == "both", "信号携带当前模式")
-        check(dict(props.Get(IFACE_LYRICS, "CurrentLine")) == signals[0],
-              "信号与 CurrentLine 属性负载逐字段一致")
-    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
-    check(str(metadata.get("moekoe:lyrics", "")) == "光をつかむ", "Metadata 跟随行切换更新")
-
-    # ---------------- 模式切换（通过 chrome.storage） ----------------
-    print("\n[单翻译 translation]")
-    harness.send({"setMode": "translation"})
-    time.sleep(0.3)
-    pump()
-    check(str(props.Get(IFACE_LYRICS, "Mode")) == "translation", "Mode 切换为 translation")
-    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
-    check("moekoe:translation" in metadata, "保留 moekoe:translation")
-    check("moekoe:lyrics" not in metadata, "不出现 moekoe:lyrics")
-    current = dict(props.Get(IFACE_LYRICS, "CurrentLine"))
-    check("text" not in current, "CurrentLine 不含原文字段")
-    check(str(current.get("translation", "")) == "抓住光芒", "CurrentLine 只含译文")
-    lyrics_json = json.loads(str(props.Get(IFACE_LYRICS, "LyricsJson")))
-    check(all("text" not in item for item in lyrics_json), "LyricsJson 不含原文")
-
-    print("\n[单歌词 original]")
-    harness.send({"setMode": "original"})
-    time.sleep(0.3)
-    pump()
-    check(str(props.Get(IFACE_LYRICS, "Mode")) == "original", "Mode 切换为 original")
-    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
-    check("moekoe:lyrics" in metadata, "保留 moekoe:lyrics")
-    check("moekoe:translation" not in metadata, "不出现 moekoe:translation")
-    current = dict(props.Get(IFACE_LYRICS, "CurrentLine"))
-    check("translation" not in current, "CurrentLine 不含译文字段")
-
-    print("\n[回到歌词翻译 both]")
-    harness.send({"setMode": "both"})
-    time.sleep(0.3)
-    pump()
-    check(str(props.Get(IFACE_LYRICS, "Mode")) == "both", "Mode 回到 both")
-    metadata = dict(props.Get(IFACE_PLAYER, "Metadata"))
-    check("moekoe:lyrics" in metadata and "moekoe:translation" in metadata, "两个歌词键同时存在")
-
-    # ---------------- 悬浮窗显示配置（Overlay 接口 + 持久化） ----------------
-    print("\n[悬浮窗显示配置]")
-    check(bool(props.Get(IFACE_OVERLAY, "Enabled")) is True, "默认 Enabled = true")
-    check(abs(float(props.Get(IFACE_OVERLAY, "Opacity")) - 0.62) < 1e-6, "默认 Opacity = 0.62")
-    check(str(props.Get(IFACE_OVERLAY, "Position")) == "bottom-center", "默认 Position = bottom-center")
-    check(bool(props.Get(IFACE_OVERLAY, "ClickThrough")) is True, "默认 ClickThrough = true")
-    check(abs(float(props.Get(IFACE_OVERLAY, "Scale")) - 1.0) < 1e-6, "默认 Scale = 1.0")
-
-    overlay_changes = []
-    bus.add_signal_receiver(
-        lambda iface, changed, invalidated: overlay_changes.append((str(iface), dict(changed))),
-        signal_name="PropertiesChanged",
-        dbus_interface=IFACE_PROPS,
-        path=PATH,
-        bus_name=DBUS_NAME,
-    )
-
-    harness.send({"setConfig": {
-        "opacity": 0.3, "position": "top-left",
-        "clickThrough": False, "enabled": False, "scale": 0.5,
-    }})
-    time.sleep(0.3)
-    pump()
-    check(abs(float(props.Get(IFACE_OVERLAY, "Opacity")) - 0.3) < 1e-6, "Opacity 更新为 0.3")
-    check(str(props.Get(IFACE_OVERLAY, "Position")) == "top-left", "Position 更新为 top-left")
-    check(bool(props.Get(IFACE_OVERLAY, "ClickThrough")) is False, "ClickThrough 更新为 false")
-    check(bool(props.Get(IFACE_OVERLAY, "Enabled")) is False, "Enabled 更新为 false")
-    check(abs(float(props.Get(IFACE_OVERLAY, "Scale")) - 0.5) < 1e-6, "Scale 更新为 0.5")
-    check(any(iface == IFACE_OVERLAY for iface, _ in overlay_changes),
-          "Overlay 发出 PropertiesChanged")
-
-    # 拖动回写：SavePosition 切到 custom 并记录坐标
-    overlay.SavePosition(dbus.Int32(200), dbus.Int32(80))
-    time.sleep(0.2)
-    pump()
-    check(str(props.Get(IFACE_OVERLAY, "Position")) == "custom", "SavePosition 后 Position = custom")
-    check(int(props.Get(IFACE_OVERLAY, "PosX")) == 200, "SavePosition 后 PosX = 200")
-    check(int(props.Get(IFACE_OVERLAY, "PosY")) == 80, "SavePosition 后 PosY = 80")
-
-    # 非法值被忽略（不改变现状、不抛错）
-    harness.send({"setConfig": {"position": "middle", "opacity": "abc"}})
-    time.sleep(0.2)
-    pump()
-    check(str(props.Get(IFACE_OVERLAY, "Position")) == "custom", "非法 position 被忽略")
-
-    # 持久化：配置目录里已落盘（宿主重启后不回退）
-    with open(os.path.join(CONFIG_DIR, "config.json"), "r", encoding="utf-8") as handle:
-        saved = json.load(handle)
-    saved_overlay = saved.get("overlay") or {}
-    check(saved_overlay.get("position") == "custom", "配置已持久化 position=custom")
-    check(saved_overlay.get("enabled") is False, "配置已持久化 enabled")
-    check(abs(float(saved_overlay.get("opacity", 0)) - 0.3) < 1e-6, "配置已持久化 opacity")
-    check(saved_overlay.get("click_through") is False, "配置已持久化 click_through")
-    check(abs(float(saved_overlay.get("scale", 0)) - 0.5) < 1e-6, "配置已持久化 scale")
-    check(int(saved_overlay.get("x", -1)) == 200, "配置已持久化 x")
-    check(int(saved_overlay.get("y", -1)) == 80, "配置已持久化 y")
-
-    # ---------------- hello 无 mode 不覆盖持久化 ----------------
-    print("\n[hello 无 mode]")
-    harness.send({"toHost": {"type": "hello"}})
-    time.sleep(0.3)
-    pump()
-    check(str(props.Get(IFACE_LYRICS, "Mode")) == "both", "无 mode 的 hello 不覆盖当前模式")
+    check("moekoe:lyrics" not in metadata, "Metadata 不含私有歌词键")
+    check("moekoe:translation" not in metadata, "Metadata 不含私有译文键")
 
     # ---------------- 合并状态（弹窗刷新回执） ----------------
     print("\n[合并状态]")
@@ -376,29 +202,14 @@ def run():
     if status:
         check(status.get("ws", {}).get("connected") is True, "WS 已连接")
         check(status.get("hostReady") is True, "本地程序 ready")
-        check(status.get("mode") == "both", "mode 回报 both")
         check(status.get("track", {}).get("title") == "うぉーたーりょー", "曲目回传正确")
-        check(status.get("lineCount") == 2, "歌词行数 2")
-        check(status.get("lineIndex") == 1, "当前行 1")
         check(bool(status.get("host", {}).get("authorized")) is True, "授权状态回传")
-        overlay = status.get("overlay") or {}
-        check(overlay.get("position") == "custom", "合并状态 overlay.position")
-        check(abs(float(overlay.get("opacity", 0)) - 0.3) < 1e-6, "合并状态 overlay.opacity")
-        check(overlay.get("enabled") is False, "合并状态 overlay.enabled")
-        check(overlay.get("clickThrough") is False, "合并状态 overlay.clickThrough")
-        check(abs(float(overlay.get("scale", 0)) - 0.5) < 1e-6, "合并状态 overlay.scale")
-        check(overlay.get("running") is False, "合并状态 overlay.running（测试禁用了拉起）")
         check(status.get("bridgeAlive") is True, "bridgeAlive = true（快照新鲜）")
         check(isinstance(status.get("statusAt"), int), "statusAt 为整数时间戳")
-
-    # ---------------- 立即重启悬浮歌词（测试禁用拉起，仍应回执状态） ----------------
-    print("\n[立即重启悬浮歌词]")
-    harness.send({"toHost": {"type": "overlay-restart"}})
-    restart_reply = harness.wait_host_message("status")
-    check(restart_reply is not None, "overlay-restart 返回 status")
-    if restart_reply:
-        restart_overlay = (restart_reply.get("status") or {}).get("overlay") or {}
-        check(restart_overlay.get("running") is False, "测试禁用拉起时 running 仍为 false")
+        check("mode" not in status, "合并状态不含私有 mode 字段")
+        check("overlay" not in status, "合并状态不含私有 overlay 字段")
+        check("lineCount" not in status, "合并状态不含歌词行数字段")
+        check("lineIndex" not in status, "合并状态不含歌词行号字段")
 
     # ---------------- 指令中继（会重建 WS，放在状态查询之后） ----------------
     print("\n[指令中继]")

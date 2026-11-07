@@ -148,7 +148,6 @@ def main():
     check(os.path.isfile(os.path.join(ROOT, "background.js")), "background.js 存在")
     check(os.path.isfile(os.path.join(ROOT, "native-bridge.html")), "native-bridge.html 存在")
     check(os.path.isfile(os.path.join(ROOT, "native-bridge.js")), "native-bridge.js 存在")
-    check(os.path.isfile(os.path.join(ROOT, "lyrics-parser.js")), "lyrics-parser.js 存在")
 
     for icon in (manifest.get("icons") or {}).values():
         check(os.path.isfile(os.path.join(ROOT, icon)), "图标存在 %s" % icon)

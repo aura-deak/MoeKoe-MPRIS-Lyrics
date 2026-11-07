@@ -1,36 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MoeKoe Music MPRIS 本地程序（native host）
+"""MoeKoe Music MPRIS 桥接器
 
-由 MoeKoe Music 插件系统托管，通过 stdin/stdout 的 JSON Lines 协议通信：
+把 MoeKoe WebSocket API 的曲目与播放状态桥接到标准 MPRIS2 D-Bus 接口，
+并把 MPRIS Player 控制方法反向桥接到 MoeKoe WebSocket。
 
-  入站（MoeKoe -> 本程序）
+只暴露标准 MPRIS 接口：
+    org.mpris.MediaPlayer2            根接口（最小可用）
+    org.mpris.MediaPlayer2.Player     播放状态 / Metadata / Position / 控制
+
+MoeKoe WebSocket API 只开放 toggle / next / prev 三个控制命令，因此
+Seek / SetPosition / OpenUri 以及 Root 的 Raise / Quit 未实现。
+
+入站（MoeKoe 桥接页 -> 本程序，JSON Lines over stdin）：
     {"type":"message","payload":{...}}
     {"type":"shutdown"}
 
-  出站（本程序 -> MoeKoe，转发给插件桥接页）
-    {"type":"ready",...} / {"type":"error",...} / {"type":"pong",...} / {"type":"bye"}
-
 payload 类型：
-    hello    桥接页握手，携带当前传输模式
-    mode     切换歌词传输模式 original | translation | both
-    track    曲目元数据（标题/歌手/专辑/封面/时长/进度/播放状态）
-    lyrics   整首歌词（原始行，未按模式投影）
-    line     当前行歌词
-    status   播放状态与进度
-    position 仅进度校正
-    ping     心跳
+    hello             桥接页握手
+    track             曲目元数据 + 时长 + 进度 + 播放状态
+    status            播放状态与进度（附带桥接页快照）
+    position          仅进度校正
+    status-request    请求宿主合并状态回执（给弹窗）
+    bridge-command    中继指令（reconnect / push-all）
+    ping              心跳
 
-本程序在会话 D-Bus 上注册 org.mpris.MediaPlayer2.MoeKoeMusic，实现：
-    org.mpris.MediaPlayer2            根接口（最小可用，不开放控制）
-    org.mpris.MediaPlayer2.Player     播放状态、Metadata、Position
-    org.moekoe.MPRIS.Lyrics           歌词扩展：Mode / CurrentLine / LyricsJson + LineChanged 信号
-
-歌词只通过 Metadata 自定义键（moekoe:lyrics / moekoe:translation）和
-LineChanged 信号对外传输，具体传什么由当前传输模式决定：
-    original   单歌词    只传原文
-    translation单翻译    只传翻译
-    both       歌词翻译  原文 + 翻译
+出站（本程序 -> 桥接页，JSON Lines over stdout）：
+    ready / error / pong / status / bridge-command / control / bye
 
 日志一律写 stderr，stdout 只输出 JSON Lines。
 """
@@ -40,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -51,23 +46,7 @@ OBJECT_PATH = "/org/mpris/MediaPlayer2"
 
 IFACE_ROOT = "org.mpris.MediaPlayer2"
 IFACE_PLAYER = "org.mpris.MediaPlayer2.Player"
-IFACE_LYRICS = "org.moekoe.MPRIS.Lyrics"
-IFACE_OVERLAY = "org.moekoe.MPRIS.Overlay"
 IFACE_PROPS = "org.freedesktop.DBus.Properties"
-
-MODES = ("original", "translation", "both")
-DEFAULT_MODE = "both"
-POSITIONS = (
-    "top-left", "top-center", "top-right",
-    "bottom-left", "bottom-center", "bottom-right",
-)
-CUSTOM_POSITION = "custom"   # 拖动后的自由位置，坐标见 PosX/PosY
-DEFAULT_POSITION = "bottom-center"
-DEFAULT_OPACITY = 0.62
-DEFAULT_SCALE = 1.0
-SCALE_MIN = 0.5
-SCALE_MAX = 2.0
-CONFIG_ENV_DIR = "MOEKOE_MPRIS_CONFIG_DIR"
 
 _stdout_lock = threading.Lock()
 _quit_flag = {"value": False}
@@ -92,7 +71,7 @@ except Exception as exc:  # noqa: BLE001 - 需要把具体缺失原因告诉用�
 # --------------------------------------------------------------------------
 
 def emit(payload):
-    """向 stdout 写一行 JSON（MoeKoe 会转发给插件桥接页）。"""
+    """向 stdout 写一行 JSON（MoeKoe 会转发给桥接页）。"""
     line = json.dumps(payload, ensure_ascii=False)
     with _stdout_lock:
         try:
@@ -111,145 +90,18 @@ def log(message):
 
 
 # --------------------------------------------------------------------------
-# 歌词投影
-# --------------------------------------------------------------------------
-
-def normalize_mode(mode):
-    return mode if mode in MODES else DEFAULT_MODE
-
-
-def project_line(line, mode):
-    """把原始歌词行投影成当前传输模式下要上总线的字段。"""
-    mode = normalize_mode(mode)
-    out = {
-        "index": int(line.get("index", -1)),
-        "start": int(line.get("start", 0) or 0),
-        "duration": int(line.get("duration", 0) or 0),
-    }
-    if mode in ("original", "both"):
-        out["text"] = str(line.get("text") or "")
-    if mode in ("translation", "both"):
-        out["translation"] = str(line.get("translation") or "")
-    return out
-
-
-def project_lines(lines, mode):
-    return [project_line(line, mode) for line in lines or []]
-
-
-# --------------------------------------------------------------------------
-# 配置持久化（弹窗是唯一写入口，宿主是唯一真相源）
-# --------------------------------------------------------------------------
-
-def config_dir():
-    override = os.environ.get(CONFIG_ENV_DIR)
-    if override:
-        return override
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "moekoe-mpris")
-
-
-def config_file():
-    return os.path.join(config_dir(), "config.json")
-
-
-def load_config():
-    """启动时读取持久化配置（传输模式 + 悬浮窗显示设置）。"""
-    try:
-        with open(config_file(), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    cfg = {
-        "mode": DEFAULT_MODE,
-        "overlay": {
-            "enabled": True,
-            "opacity": DEFAULT_OPACITY,
-            "position": DEFAULT_POSITION,
-            "click_through": True,
-            "scale": DEFAULT_SCALE,
-            "x": 0,
-            "y": 0,
-        },
-    }
-    if data.get("mode") in MODES:
-        cfg["mode"] = data["mode"]
-    overlay = data.get("overlay")
-    if isinstance(overlay, dict):
-        if isinstance(overlay.get("enabled"), bool):
-            cfg["overlay"]["enabled"] = overlay["enabled"]
-        try:
-            cfg["overlay"]["opacity"] = min(max(float(overlay.get("opacity")), 0.0), 1.0)
-        except (TypeError, ValueError):
-            pass
-        if overlay.get("position") in POSITIONS or overlay.get("position") == CUSTOM_POSITION:
-            cfg["overlay"]["position"] = overlay["position"]
-        if isinstance(overlay.get("click_through"), bool):
-            cfg["overlay"]["click_through"] = overlay["click_through"]
-        try:
-            cfg["overlay"]["scale"] = min(
-                max(float(overlay.get("scale")), SCALE_MIN), SCALE_MAX)
-        except (TypeError, ValueError):
-            pass
-        for axis in ("x", "y"):
-            try:
-                cfg["overlay"][axis] = int(overlay.get(axis, 0) or 0)
-            except (TypeError, ValueError):
-                pass
-    return cfg
-
-
-def save_config(state):
-    """模式 / 显示配置变更后落盘，MoeKoe 与宿主重启后不回退。"""
-    data = {
-        "mode": state.mode,
-        "overlay": {
-            "enabled": bool(state.overlay_enabled),
-            "opacity": float(state.overlay_opacity),
-            "position": state.overlay_position,
-            "click_through": bool(state.overlay_click_through),
-            "scale": float(state.overlay_scale),
-            "x": int(state.overlay_x),
-            "y": int(state.overlay_y),
-        },
-    }
-    try:
-        os.makedirs(config_dir(), exist_ok=True)
-        tmp_path = config_file() + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, config_file())
-    except OSError as exc:
-        log("写入配置失败: %s" % exc)
-
-
-# --------------------------------------------------------------------------
 # 播放状态
 # --------------------------------------------------------------------------
 
 class PlayerState:
     def __init__(self):
-        cfg = load_config()
-        self.mode = cfg["mode"]
-        self.overlay_enabled = cfg["overlay"]["enabled"]
-        self.overlay_opacity = cfg["overlay"]["opacity"]
-        self.overlay_position = cfg["overlay"]["position"]
-        self.overlay_click_through = cfg["overlay"]["click_through"]
-        self.overlay_scale = cfg["overlay"]["scale"]
-        self.overlay_x = cfg["overlay"]["x"]
-        self.overlay_y = cfg["overlay"]["y"]
-        self.bridge_status = {}      # 桥接页最近一次全量快照（弹窗实时状态的数据源）
+        self.bridge_status = {}      # 桥接页最近一次全量快照（弹窗状态的数据源）
         self.bridge_status_at = 0.0
         self.status = "Stopped"
         self.track = {}
         self.track_key = ""
         self.track_id = OBJECT_PATH + "/Track/none"
         self.duration_us = 0
-        self.lines = []
-        self.lyrics_json = "[]"
-        self.raw_line = None
         self.position_us = 0
         self.anchor = time.monotonic()
 
@@ -280,28 +132,6 @@ class PlayerState:
             self.anchor = time.monotonic()
         self.status = status
         return changed
-
-    # ---- 歌词 ----
-    def projected_line(self):
-        if not self.raw_line:
-            return {"index": -1}
-        return project_line(self.raw_line, self.mode)
-
-    def line_payload(self):
-        """行负载的唯一构造点：CurrentLine / LineChanged / Metadata 三处出口共用。"""
-        payload = self.projected_line()
-        payload["mode"] = self.mode
-        return payload
-
-    def refresh_lyrics_json(self):
-        self.lyrics_json = json.dumps(
-            project_lines(self.lines, self.mode), ensure_ascii=False
-        )
-
-    def clear_lyrics(self):
-        self.lines = []
-        self.raw_line = None
-        self.refresh_lyrics_json()
 
 
 def make_track_id(track):
@@ -357,30 +187,40 @@ def plain_value(value):
         return dbus.Int64(value)
     if isinstance(value, float):
         return dbus.Double(value)
+    if isinstance(value, str):
+        return dbus.String(value)
     if isinstance(value, dict):
         return to_variant_dict(value)
-    return dbus.String("" if value is None else str(value))
+    if isinstance(value, (list, tuple)):
+        return dbus.Array([plain_value(item) for item in value], signature="v")
+    if value is None:
+        return dbus.String("")
+    return dbus.String(str(value))
 
 
 def typed(signature, value):
-    """把 Python 值按 D-Bus 签名转换。"""
+    """按声明签名把 Python 值包装成对应的 dbus 类型。"""
     if signature == "b":
         return dbus.Boolean(bool(value))
-    if signature == "s":
-        return dbus.String(str(value))
-    if signature == "x":
-        return dbus.Int64(int(value))
     if signature == "i":
         return dbus.Int32(int(value))
+    if signature == "x":
+        return dbus.Int64(int(value))
     if signature == "d":
         return dbus.Double(float(value))
+    if signature == "s":
+        return dbus.String(str(value))
+    if signature == "o":
+        return dbus.ObjectPath(str(value))
     if signature == "as":
-        return dbus.Array([dbus.String(item) for item in value], signature="s")
+        return dbus.Array([dbus.String(str(item)) for item in (value or [])], signature="s")
     if signature == "a{sv}":
         if isinstance(value, dbus.Dictionary):
             return value
         return to_variant_dict(value)
-    raise ValueError("不支持的签名: %s" % signature)
+    if signature == "v":
+        return plain_value(value)
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -418,26 +258,6 @@ def player_properties(state):
     }
 
 
-def lyrics_properties(state):
-    return {
-        "Mode": ("s", state.mode),
-        "CurrentLine": ("a{sv}", state.line_payload()),
-        "LyricsJson": ("s", state.lyrics_json),
-    }
-
-
-def overlay_properties(state):
-    return {
-        "Enabled": ("b", bool(state.overlay_enabled)),
-        "Opacity": ("d", float(state.overlay_opacity)),
-        "Position": ("s", str(state.overlay_position)),
-        "ClickThrough": ("b", bool(state.overlay_click_through)),
-        "Scale": ("d", float(state.overlay_scale)),
-        "PosX": ("i", int(state.overlay_x)),
-        "PosY": ("i", int(state.overlay_y)),
-    }
-
-
 def build_metadata(state):
     metadata = dbus.Dictionary(signature="sv")
     if not state.track:
@@ -463,17 +283,10 @@ def build_metadata(state):
     if art.startswith(("http://", "https://", "file://")):
         metadata["mpris:artUrl"] = dbus.String(art)
 
-    # 曲目 URL（现有歌词客户端按它做歌曲识别 / 本地同名 LRC 推导）
     url = str(state.track.get("url") or "")
     if url.startswith(("http://", "https://", "file://")):
         metadata["xesam:url"] = dbus.String(url)
 
-    # 歌词字段与 CurrentLine/LineChanged 同源：投影决定出现与否
-    line = state.line_payload()
-    if line.get("text"):
-        metadata["moekoe:lyrics"] = dbus.String(str(line["text"]))
-    if line.get("translation"):
-        metadata["moekoe:translation"] = dbus.String(str(line["translation"]))
     return metadata
 
 
@@ -530,27 +343,6 @@ INTROSPECT_XML = """<node>
     <property name="CanSeek" type="b" access="read"/>
     <property name="CanControl" type="b" access="read"/>
   </interface>
-  <interface name="org.moekoe.MPRIS.Lyrics">
-    <signal name="LineChanged">
-      <arg name="line" type="a{sv}"/>
-    </signal>
-    <property name="Mode" type="s" access="read"/>
-    <property name="CurrentLine" type="a{sv}" access="read"/>
-    <property name="LyricsJson" type="s" access="read"/>
-  </interface>
-  <interface name="org.moekoe.MPRIS.Overlay">
-    <method name="SavePosition">
-      <arg name="X" type="i" direction="in"/>
-      <arg name="Y" type="i" direction="in"/>
-    </method>
-    <property name="Enabled" type="b" access="read"/>
-    <property name="Opacity" type="d" access="read"/>
-    <property name="Position" type="s" access="read"/>
-    <property name="ClickThrough" type="b" access="read"/>
-    <property name="Scale" type="d" access="read"/>
-    <property name="PosX" type="i" access="read"/>
-    <property name="PosY" type="i" access="read"/>
-  </interface>
   <interface name="org.freedesktop.DBus.Properties">
     <method name="Get">
       <arg name="interface_name" type="s" direction="in"/>
@@ -600,10 +392,6 @@ if DBUS_AVAILABLE:
                 return root_properties()
             if interface == IFACE_PLAYER:
                 return player_properties(self.state)
-            if interface == IFACE_LYRICS:
-                return lyrics_properties(self.state)
-            if interface == IFACE_OVERLAY:
-                return overlay_properties(self.state)
             return None
 
         def lookup(self, interface, prop):
@@ -651,42 +439,14 @@ if DBUS_AVAILABLE:
             if changed:
                 self.PropertiesChanged(interface, changed, dbus.Array([], signature="s"))
 
-        # ---------------- 歌词扩展 ----------------
-        @dbus.service.signal(IFACE_LYRICS, signature="a{sv}")
-        def LineChanged(self, line):
-            """org.moekoe.MPRIS.Lyrics.LineChanged"""
-
-        def emit_line_signal(self):
-            # 与 CurrentLine 属性走同一构造函数，负载逐字段一致
-            self.LineChanged(to_variant_dict(self.state.line_payload()))
-
-        def emit_line(self):
-            self.emit_line_signal()
-            self.notify(IFACE_LYRICS, ["CurrentLine"])
-            self.notify(IFACE_PLAYER, ["Metadata"])
-
-        # ---------------- 悬浮窗扩展：拖动后回写自由位置 ----------------
-        @dbus.service.method(IFACE_OVERLAY, in_signature="ii", out_signature="")
-        def SavePosition(self, x, y):
-            """悬浮客户端拖动结束后把自由坐标回写宿主，由宿主持久化。
-
-            位置模型：Position 为预设值或 "custom"；"custom" 时用 PosX/PosY
-            表示相对当前输出左上角的像素坐标。
-            """
-            self.state.overlay_position = CUSTOM_POSITION
-            self.state.overlay_x = int(x)
-            self.state.overlay_y = int(y)
-            save_config(self.state)
-            self.notify(IFACE_OVERLAY, ["Position", "PosX", "PosY"])
-
         # ---------------- MPRIS 根接口 ----------------
         @dbus.service.method(IFACE_ROOT, in_signature="", out_signature="")
         def Raise(self):
-            raise NotSupported("MoeKoe Music 插件未开放 Raise")
+            raise NotSupported("MoeKoe Music 未开放 Raise")
 
         @dbus.service.method(IFACE_ROOT, in_signature="", out_signature="")
         def Quit(self):
-            raise NotSupported("MoeKoe Music 插件未开放 Quit")
+            raise NotSupported("MoeKoe Music 未开放 Quit")
 
         # ---------------- MPRIS Player：通过桥接页控制 MoeKoe ----------------
         @dbus.service.method(IFACE_PLAYER, in_signature="", out_signature="")
@@ -718,15 +478,15 @@ if DBUS_AVAILABLE:
 
         @dbus.service.method(IFACE_PLAYER, in_signature="x", out_signature="")
         def Seek(self, offset):
-            raise NotSupported("MoeKoe WebSocket API 暂未开放 Seek")
+            raise NotSupported("MoeKoe WebSocket API 未开放 Seek")
 
         @dbus.service.method(IFACE_PLAYER, in_signature="ox", out_signature="")
         def SetPosition(self, track_id, position):
-            raise NotSupported("MoeKoe WebSocket API 暂未开放 SetPosition")
+            raise NotSupported("MoeKoe WebSocket API 未开放 SetPosition")
 
         @dbus.service.method(IFACE_PLAYER, in_signature="s", out_signature="")
         def OpenUri(self, uri):
-            raise NotSupported("MoeKoe WebSocket API 暂未开放 OpenUri")
+            raise NotSupported("MoeKoe WebSocket API 未开放 OpenUri")
 
         # ---------------- Introspection ----------------
         @dbus.service.method(
@@ -748,16 +508,11 @@ class Controller:
     def handle(self, payload):
         handler = {
             "hello": self.on_hello,
-            "mode": self.on_mode,
             "track": self.on_track,
-            "lyrics": self.on_lyrics,
-            "line": self.on_line,
             "status": self.on_status,
             "position": self.on_position,
-            "config": self.on_config,
             "status-request": self.on_status_request,
             "bridge-command": self.on_bridge_command,
-            "overlay-restart": self.on_overlay_restart,
             "ping": self.on_ping,
         }.get(payload.get("type"))
 
@@ -771,38 +526,18 @@ class Controller:
             emit({"type": "error", "message": "处理消息失败: %s" % exc})
         return False
 
-    # ---- 握手 / 模式 ----
+    # ---- 握手 ----
     def on_hello(self, payload):
-        # 只有显式携带 mode 的 hello 才覆盖（兼容旧桥接页）；重启后的默认值
-        # 来自持久化配置，桥接页重连不会把弹窗里设置的模式冲掉。
-        if payload.get("mode") is not None:
-            mode = normalize_mode(payload.get("mode"))
-            if mode != self.state.mode:
-                self.state.mode = mode
-                self.state.refresh_lyrics_json()
-                self.obj.notify(IFACE_LYRICS, ["Mode", "LyricsJson"])
-                self.obj.emit_line()
         emit(
             {
                 "type": "ready",
                 "protocol": PROTOCOL,
                 "dbusName": DBUS_NAME,
                 "objectPath": OBJECT_PATH,
-                "mode": self.state.mode,
                 "pid": os.getpid(),
                 "dbus": "dbus-python",
             }
         )
-
-    def on_mode(self, payload):
-        mode = normalize_mode(payload.get("mode"))
-        if mode == self.state.mode:
-            return
-        self.state.mode = mode
-        self.state.refresh_lyrics_json()
-        save_config(self.state)
-        self.obj.notify(IFACE_LYRICS, ["Mode", "LyricsJson"])
-        self.obj.emit_line()  # LineChanged + CurrentLine + Metadata 一次发布
 
     # ---- 曲目 ----
     def on_track(self, payload):
@@ -824,7 +559,6 @@ class Controller:
             self.state.duration_us = 0
 
         if track_changed:
-            self.state.clear_lyrics()
             if payload.get("position") is not None:
                 self.state.set_position_seconds(payload.get("position"))
             else:
@@ -837,24 +571,9 @@ class Controller:
             self.state.set_status(status)
 
         if track_changed:
-            self.obj.notify(IFACE_PLAYER, ["PlaybackStatus"])
-            self.obj.notify(IFACE_LYRICS, ["LyricsJson"])
-            self.obj.emit_line()  # LineChanged + CurrentLine + Metadata 一次发布
+            self.obj.notify(IFACE_PLAYER, ["PlaybackStatus", "Metadata"])
         else:
-            names = ["Metadata"]
-            self.obj.notify(IFACE_PLAYER, names)
-
-    # ---- 歌词 ----
-    def on_lyrics(self, payload):
-        lines = payload.get("lines")
-        self.state.lines = lines if isinstance(lines, list) else []
-        self.state.refresh_lyrics_json()
-        self.obj.notify(IFACE_LYRICS, ["LyricsJson"])
-
-    def on_line(self, payload):
-        line = payload.get("line")
-        self.state.raw_line = line if isinstance(line, dict) else None
-        self.obj.emit_line()
+            self.obj.notify(IFACE_PLAYER, ["Metadata"])
 
     # ---- 播放状态与进度 ----
     def on_status(self, payload):
@@ -865,57 +584,14 @@ class Controller:
             self.obj.notify(IFACE_PLAYER, ["PlaybackStatus"])
         snapshot = payload.get("snapshot")
         if isinstance(snapshot, dict):
-            # 桥接页全量快照：弹窗设置页与状态列表都以它为准
             self.state.bridge_status = snapshot
             self.state.bridge_status_at = time.time()
 
     def on_position(self, payload):
         self.state.set_position_seconds(payload.get("position"))
 
-    # ---- 弹窗：显示配置 / 状态回执 / 指令中继 ----
-    def on_config(self, payload):
-        changed = []
-        if isinstance(payload.get("enabled"), bool) and payload["enabled"] != self.state.overlay_enabled:
-            self.state.overlay_enabled = payload["enabled"]
-            changed.append("Enabled")
-        if payload.get("opacity") is not None:
-            try:
-                value = min(max(float(payload.get("opacity")), 0.0), 1.0)
-            except (TypeError, ValueError):
-                value = None
-            if value is not None and abs(value - self.state.overlay_opacity) > 1e-9:
-                self.state.overlay_opacity = value
-                changed.append("Opacity")
-        if payload.get("position") in POSITIONS and payload["position"] != self.state.overlay_position:
-            self.state.overlay_position = payload["position"]
-            changed.append("Position")
-        if isinstance(payload.get("clickThrough"), bool) and payload["clickThrough"] != self.state.overlay_click_through:
-            self.state.overlay_click_through = payload["clickThrough"]
-            changed.append("ClickThrough")
-        if payload.get("scale") is not None:
-            try:
-                value = min(max(float(payload.get("scale")), SCALE_MIN), SCALE_MAX)
-            except (TypeError, ValueError):
-                value = None
-            if value is not None and abs(value - self.state.overlay_scale) > 1e-9:
-                self.state.overlay_scale = value
-                changed.append("Scale")
-        if not changed:
-            return
-        save_config(self.state)
-        self.obj.notify(IFACE_OVERLAY, changed)
-        ensure_overlay(self.state)  # 开关从关到开且进程不在时补拉起
-
+    # ---- 状态回执 / 指令中继 ----
     def on_status_request(self, payload):
-        emit({"type": "status", "status": self.status_payload()})
-
-    def on_overlay_restart(self, payload):
-        """弹窗「立即重启悬浮歌词」：结束当前客户端并拉起新进程。
-
-        与「完全重启 MoeKoe」等价，但不用重启整个应用；重启后回执一次
-        合并状态，弹窗据此刷新运行指示。
-        """
-        restart_overlay(self.state)
         emit({"type": "status", "status": self.status_payload()})
 
     def on_bridge_command(self, payload):
@@ -923,27 +599,13 @@ class Controller:
         if cmd not in ("reconnect", "push-all"):
             emit({"type": "error", "message": "未知 bridge-command: %s" % cmd})
             return
-        # 再广播回 stdout：桥接页执行指令，弹窗顺带收到用于刷新
         emit({"type": "bridge-command", "cmd": cmd})
 
     def status_payload(self):
-        """宿主侧合并状态：桥接页快照 + 宿主真相（弹窗设置页的唯一数据源）。"""
         merged = dict(self.state.bridge_status)
-        proc = _overlay_proc["proc"]
         merged.update(
             {
                 "hostReady": True,
-                "mode": self.state.mode,
-                "overlay": {
-                    "enabled": bool(self.state.overlay_enabled),
-                    "opacity": round(float(self.state.overlay_opacity), 4),
-                    "position": self.state.overlay_position,
-                    "clickThrough": bool(self.state.overlay_click_through),
-                    "scale": round(float(self.state.overlay_scale), 4),
-                    "x": int(self.state.overlay_x),
-                    "y": int(self.state.overlay_y),
-                    "running": bool(proc is not None and proc.poll() is None),
-                },
                 "bridgeAlive": bool(
                     self.state.bridge_status
                     and time.time() - self.state.bridge_status_at < 5.0
@@ -1021,92 +683,6 @@ def degraded_loop():
             break
 
 
-OVERLAY_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "extras", "moekoe-lyric-overlay", "moekoe-lyric-overlay",
-)
-
-_overlay_proc = {"proc": None}
-
-
-def spawn_overlay(state):
-    """随宿主启动悬浮歌词客户端（MoeKoe 起 → 宿主起 → 这里拉起）。
-
-    MOEKOE_MPRIS_NO_OVERLAY=1 时跳过（自动化测试用）；显示开关关闭时不拉起；
-    子进程输出写入 ~/.cache/moekoe-mpris/overlay.log，便于排查未启动的原因。
-    """
-    if os.environ.get("MOEKOE_MPRIS_NO_OVERLAY") == "1":
-        return None
-    if not state.overlay_enabled:
-        log("悬浮歌词显示开关为关，跳过启动")
-        return None
-    if not os.path.isfile(OVERLAY_SCRIPT):
-        log("悬浮歌词客户端不存在，跳过自动启动: %s" % OVERLAY_SCRIPT)
-        return None
-
-    log_file = None
-    try:
-        log_dir = os.path.join(
-            os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
-            "moekoe-mpris",
-        )
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = open(os.path.join(log_dir, "overlay.log"), "ab", buffering=0)
-    except OSError:
-        pass
-
-    try:
-        # 经 python3 启动：zip 解压后脚本可能没有可执行位
-        proc = subprocess.Popen(
-            [sys.executable, OVERLAY_SCRIPT],
-            stdin=subprocess.DEVNULL,
-            stdout=log_file or subprocess.DEVNULL,
-            stderr=log_file or subprocess.DEVNULL,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log("拉起悬浮歌词客户端失败: %s" % exc)
-        return None
-    finally:
-        if log_file is not None:
-            log_file.close()
-
-    log("已拉起悬浮歌词客户端（pid=%d）" % proc.pid)
-    return proc
-
-
-def ensure_overlay(state):
-    """开关打开但没有存活进程时补拉一次（弹窗打开开关触发）。"""
-    proc = _overlay_proc["proc"]
-    if proc is not None and proc.poll() is None:
-        return proc
-    _overlay_proc["proc"] = spawn_overlay(state)
-    return _overlay_proc["proc"]
-
-
-def restart_overlay(state):
-    """结束当前悬浮客户端再拉起一个新的（弹窗「立即重启」触发）。
-
-    先 SIGTERM 等其自行退出（释放 org.moekoe.LyricOverlay 单实例名），
-    超时才 SIGKILL；随后交给 ensure_overlay 按当前开关决定是否拉起。
-    """
-    proc = _overlay_proc["proc"]
-    if proc is not None and proc.poll() is None:
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-                proc.wait(timeout=1)
-            except Exception:  # noqa: BLE001 - 退出兜底，失败也不阻塞重启
-                pass
-        except Exception:  # noqa: BLE001
-            pass
-    _overlay_proc["proc"] = None
-    return ensure_overlay(state)
-
-
-
 def main():
     if not DBUS_AVAILABLE:
         emit(
@@ -1167,25 +743,16 @@ def main():
             "protocol": PROTOCOL,
             "dbusName": DBUS_NAME,
             "objectPath": OBJECT_PATH,
-            "mode": state.mode,
             "pid": os.getpid(),
             "dbus": "dbus-python",
         }
     )
-    log("已注册 %s（mode=%s）" % (DBUS_NAME, state.mode))
-    overlay_proc = spawn_overlay(state)
-    _overlay_proc["proc"] = overlay_proc
+    log("已注册 %s" % DBUS_NAME)
 
     threading.Thread(target=read_stdin, args=(controller,), daemon=True).start()
     try:
         loop.run()
     finally:
-        if overlay_proc is not None:
-            try:
-                if overlay_proc.poll() is None:
-                    overlay_proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
         try:
             bus.release_name(DBUS_NAME)
         except Exception:  # noqa: BLE001

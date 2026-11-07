@@ -7,10 +7,6 @@ echo "== manifest 校验 =="
 python3 tests/test_manifest.py
 
 echo
-echo "== 歌词解析（Node） =="
-node tests/test-lyrics-parser.js
-
-echo
 echo "== 本地程序 D-Bus 集成 =="
 python3 tests/test_mpris_host.py
 
