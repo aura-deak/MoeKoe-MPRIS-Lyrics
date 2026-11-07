@@ -52,6 +52,7 @@ jobs:
       - name: 获取 Release 信息
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
           # toJSON 输出 JSON 字面量，经 env 传入再用 jq 解码，
           # 避免 Release 正文含引号/反引号时被 shell 解释
@@ -63,7 +64,9 @@ jobs:
           fi
           BODY="$(printf '%s' "$RELEASE_BODY_JSON" | jq -r '.')"
           if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
-            BODY="$(gh release view "$TAG" --json body -q .body)"
+            # 本 workflow 不 checkout 仓库，gh 无法从 git remote 推断仓库，
+            # 必须用 -R 显式指定（手动补发时走这里）
+            BODY="$(gh release view "$TAG" -R "$REPO" --json body -q .body)"
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           # Release 正文写入文件，避免 shell 注入/转义问题；
