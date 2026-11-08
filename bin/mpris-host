@@ -326,7 +326,8 @@ class PlayerState:
         self.anchor = time.monotonic()
         # xesam:asText 配置
         self.asTextFormat = 'lrc'    # 'plain' | 'lrc'
-        self.asTextSource = 'original' # 'original' | 'translation' 
+        self.asTextSource = 'original' # 'original' | 'translation'
+        self.asTextApiFallback = False # 翻译模式取不到翻译时是否走 Bilibili API 翻译 
 
     # ---- 进度 ----
     def set_position_seconds(self, seconds):
@@ -839,8 +840,16 @@ class Controller:
                 self.state.asTextFormat = payload["asTextFormat"]
             if payload.get("asTextSource") in ("original", "translation"):
                 self.state.asTextSource = payload["asTextSource"]
+            if isinstance(payload.get("asTextApiFallback"), bool):
+                self.state.asTextApiFallback = payload["asTextApiFallback"]
             # 不主动通知 Metadata；等待 bridge 重新推送 track 后由 on_track 自然触发
-            emit({"type": "bridge-command", "cmd": "set-config", "asTextFormat": self.state.asTextFormat, "asTextSource": self.state.asTextSource})
+            emit({
+                "type": "bridge-command",
+                "cmd": "set-config",
+                "asTextFormat": self.state.asTextFormat,
+                "asTextSource": self.state.asTextSource,
+                "asTextApiFallback": self.state.asTextApiFallback,
+            })
             return
         if cmd == "fix-launcher":
             # 本地处理：生成带 --disable-features=MediaSessionService 的启动包装，
@@ -873,6 +882,7 @@ class Controller:
                 "statusAt": int(time.time() * 1000),
                 "asTextFormat": self.state.asTextFormat,
                 "asTextSource": self.state.asTextSource,
+                "asTextApiFallback": self.state.asTextApiFallback,
             }
         )
         return merged

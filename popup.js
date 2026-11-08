@@ -12,13 +12,15 @@ const state = {
   live: null,
   host: null,
   asTextFormat: 'lrc',
-  asTextSource: 'original'
+  asTextSource: 'original',
+  asTextApiFallback: false
 };
 
 // 默认配置
 const DEFAULT_CONFIG = {
   asTextFormat: 'lrc',
-  asTextSource: 'original'
+  asTextSource: 'original',
+  asTextApiFallback: false
 };
 
 // 从 storage 加载配置
@@ -28,10 +30,13 @@ function loadConfig() {
       resolve(DEFAULT_CONFIG);
       return;
     }
-    chrome.storage.local.get(['asTextFormat', 'asTextSource'], function (items) {
+    chrome.storage.local.get(['asTextFormat', 'asTextSource', 'asTextApiFallback'], function (items) {
       resolve({
         asTextFormat: items.asTextFormat || DEFAULT_CONFIG.asTextFormat,
-        asTextSource: items.asTextSource || DEFAULT_CONFIG.asTextSource
+        asTextSource: items.asTextSource || DEFAULT_CONFIG.asTextSource,
+        asTextApiFallback: typeof items.asTextApiFallback === 'boolean'
+          ? items.asTextApiFallback
+          : DEFAULT_CONFIG.asTextApiFallback
       });
     });
   });
@@ -49,7 +54,8 @@ function saveConfig(config) {
     type: 'bridge-command',
     cmd: 'set-config',
     asTextFormat: config.asTextFormat,
-    asTextSource: config.asTextSource
+    asTextSource: config.asTextSource,
+    asTextApiFallback: config.asTextApiFallback
   }).then(function () {
     // 配置已推送，刷新状态回执
     refresh();
@@ -171,6 +177,7 @@ function applyLiveStatus(status) {
   // 从宿主回执更新配置（启动时/重连时同步）
   if (typeof status.asTextFormat === 'string') state.asTextFormat = status.asTextFormat;
   if (typeof status.asTextSource === 'string') state.asTextSource = status.asTextSource;
+  if (typeof status.asTextApiFallback === 'boolean') state.asTextApiFallback = status.asTextApiFallback;
   render();
 }
 
@@ -260,6 +267,12 @@ function render() {
     var active = button.dataset.source === state.asTextSource;
     button.setAttribute('aria-checked', active ? 'true' : 'false');
   });
+  var fallbackValue = state.asTextApiFallback ? 'on' : 'off';
+  var fallbackButtons = document.querySelectorAll('#fallback-modes button');
+  Array.prototype.forEach.call(fallbackButtons, function (button) {
+    var active = button.dataset.fallback === fallbackValue;
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
 }
 
 /* ---------------- 刷新 ---------------- */
@@ -289,7 +302,7 @@ function bind() {
       var format = button.dataset.format;
       if (format !== state.asTextFormat) {
         state.asTextFormat = format;
-        saveConfig({ asTextFormat: format, asTextSource: state.asTextSource });
+        saveConfig({ asTextFormat: format, asTextSource: state.asTextSource, asTextApiFallback: state.asTextApiFallback });
       }
     });
   });
@@ -300,7 +313,18 @@ function bind() {
       var source = button.dataset.source;
       if (source !== state.asTextSource) {
         state.asTextSource = source;
-        saveConfig({ asTextFormat: state.asTextFormat, asTextSource: source });
+        saveConfig({ asTextFormat: state.asTextFormat, asTextSource: source, asTextApiFallback: state.asTextApiFallback });
+      }
+    });
+  });
+
+  // api-fallback 选择（翻译模式取不到翻译时的兜底行为）
+  document.querySelectorAll('#fallback-modes button').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var fallback = button.dataset.fallback === 'on';
+      if (fallback !== state.asTextApiFallback) {
+        state.asTextApiFallback = fallback;
+        saveConfig({ asTextFormat: state.asTextFormat, asTextSource: state.asTextSource, asTextApiFallback: fallback });
       }
     });
   });

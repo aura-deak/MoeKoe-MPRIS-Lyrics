@@ -58,6 +58,21 @@
             </button>
           </div>
         </div>
+
+        <div class="config-group">
+          <h3>翻译获取不到时（api-fallback）</h3>
+          <p class="tip">选择「翻译」来源但歌曲没有软件翻译时的行为。API 翻译使用 Bilibili 免费 Index-Translate 接口，逐行译为简体中文。</p>
+          <div class="modes" id="fallback-modes" role="radiogroup" aria-label="翻译获取不到时的行为">
+            <button type="button" data-fallback="off" role="radio">
+              <strong>原文透传</strong>
+              <span>直接传输原文歌词</span>
+            </button>
+            <button type="button" data-fallback="on" role="radio">
+              <strong>Bilibili API 翻译</strong>
+              <span>调用 Bilibili 翻译 API 兜底</span>
+            </button>
+          </div>
+        </div>
       </section>
     </div>
 

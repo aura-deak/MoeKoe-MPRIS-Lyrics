@@ -134,6 +134,11 @@ MoeKoe 推送的 `lyrics` 消息既用来取曲目与进度，也用来填充标
 MPRIS 元数据，供支持这些字段的桌面媒体组件（如部分 KDE / GNOME 控件）读取。
 插件不暴露任何私有 D-Bus 接口，只做标准 MPRIS 桥接。
 
+**api-fallback 翻译兜底**：弹窗选择「翻译」来源但歌曲没有软件自带翻译时，可在弹窗中开启
+「Bilibili API 翻译」兜底——调用 Bilibili 免费 Index-Translate API
+（`https://index-translate.bilibili.com/v1`，OpenAI 兼容，无需 key）逐行译为简体中文，
+并按行号回贴原 LRC 时间标签；翻译失败或未开启兜底时原文透传。
+
 ---
 
 ## 目录结构
@@ -168,7 +173,7 @@ moekoe-mpris/
 | `status` | `isPlaying`、`position`，可选 `snapshot` | 播放状态与进度；`snapshot` 为桥接页自述状态 |
 | `position` | `position` | 仅进度校正 |
 | `status-request` | — | 返回一条合并后的 `status`（宿主 + 桥接页快照） |
-| `bridge-command` | `cmd`（`reconnect` / `push-all` / `set-config` / `fix-launcher` / `unfix-launcher`） | `reconnect` / `push-all` 转发给桥接页；`set-config` 更新歌词配置；`fix-launcher` / `unfix-launcher` 由本地程序直接处理（启动包装的创建与撤销） |
+| `bridge-command` | `cmd`（`reconnect` / `push-all` / `set-config` / `fix-launcher` / `unfix-launcher`） | `reconnect` / `push-all` 转发给桥接页；`set-config` 更新歌词配置（`asTextFormat` / `asTextSource` / `asTextApiFallback`）；`fix-launcher` / `unfix-launcher` 由本地程序直接处理（启动包装的创建与撤销） |
 | `ping` | — | 心跳 |
 
 出站（stdout，JSON Lines，单条 < 64KB）：`ready` / `pong` / `error` / `bye` /

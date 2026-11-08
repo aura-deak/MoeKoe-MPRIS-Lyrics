@@ -20,6 +20,10 @@
   var POSITION_INTERVAL = 500;    // 位置上报最小间隔（毫秒）
   var MAX_PAYLOAD = 60000;        // Native Host 单条 stdin 消息上限 64KB，留出余量
 
+  // Bilibili Index-Translate 免费 API（OpenAI 兼容，无需 key）
+  var BILI_TRANSLATE_URL = 'https://index-translate.bilibili.com/v1/chat/completions';
+  var BILI_TRANSLATE_MODEL = 'Index-Translate-35B-A3B';
+
   var state = {
     wsConnected: false,
     wsLastError: '',
@@ -38,7 +42,8 @@
     chmodCommand: '',
     // xesam:asText 配置
     asTextFormat: 'lrc',    // 'plain' | 'lrc'
-    asTextSource: 'original'  // 'original' | 'translation'
+    asTextSource: 'original', // 'original' | 'translation'
+    asTextApiFallback: false  // 翻译模式取不到翻译时，是否走 Bilibili API 翻译
   };
 
   /* ---------------- 工具 ---------------- */
@@ -297,9 +302,12 @@ function extractLyricsMeta(data, song) {
     var translationPlain = stripLrc(capBytes(rawTranslation, 40000));
     var translationLrc = capBytes(rawTranslation, 40000);
 
-    // 根据当前配置选择
+    // 根据当前配置选择：
+    // - 原文模式 → 原文
+    // - 翻译模式且有翻译 → 翻译（中文歌词除外：无论配置直接原文透传）
+    // - 翻译模式但取不到翻译 → 原文透传（api-fallback 打开时由 maybeTranslateWithApi 异步补翻译后重推）
     var finalLyrics = originalPlain;
-    if (state.asTextSource === 'translation') {
+    if (state.asTextSource === 'translation' && translationLrc && !isMostlyChinese(rawOriginal)) {
       finalLyrics = state.asTextFormat === 'lrc' ? translationLrc : translationPlain;
     } else {
       finalLyrics = state.asTextFormat === 'lrc' ? originalLrc : originalPlain;
@@ -314,6 +322,145 @@ function extractLyricsMeta(data, song) {
       translationLrc: translationLrc,
       lyricists: lyricists
     };
+  }
+
+  /* ---------------- Bilibili API 翻译（api-fallback） ---------------- */
+
+  /** 中文率：CJK 汉字占全部有效字符（去时间标签/空白/标点）的比例 */
+  function chineseRatio(text) {
+    var cleaned = String(text || '').replace(/\[[^\]]*\]/g, '');
+    var chars = cleaned.replace(/[\s\p{P}\p{S}]/gu, '');
+    if (!chars.length) return 0;
+    var cjk = (chars.match(/[\u3400-\u4dbf\u4e00-\u9fff]/g) || []).length;
+    return cjk / chars.length;
+  }
+
+  /** 中文率 ≥ 80% 视为中文歌词：无论配置如何，直接原文透传到翻译通道 */
+  function isMostlyChinese(text) {
+    return chineseRatio(text) >= 0.8;
+  }
+
+  /** 拆一行 LRC：行首时间标签 + 歌词正文 */
+  function splitLrcLine(line) {
+    var stamps = '';
+    var rest = String(line || '');
+    var match;
+    while ((match = rest.match(/^\s*\[[^\]]*\]/))) {
+      stamps += match[0];
+      rest = rest.replace(/^\s*\[[^\]]*\]\s*/, '');
+    }
+    return { stamps: stamps, text: rest };
+  }
+
+  /**
+   * 调用 Bilibili Index-Translate API 逐行翻译歌词。
+   * 输入保留时间标签的 LRC，输出同样格式：时间标签原样保留，正文换成译文。
+   * 行号协议：发送「N|正文」，要求译文同样「N|译文」，按行号回贴，防止错位。
+   */
+  function translateLyricsViaBilibili(lrcText) {
+    var lines = String(lrcText || '').replace(/^\uFEFF/, '').split('\n');
+    var numbered = lines.map(function (line, index) {
+      return (index + 1) + '|' + splitLrcLine(line).text;
+    }).join('\n');
+
+    return fetch(BILI_TRANSLATE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer unused'  // API 无需鉴权，仅兼容客户端格式
+      },
+      body: JSON.stringify({
+        model: BILI_TRANSLATE_MODEL,
+        temperature: 0.1,
+        messages: [
+          {
+            role: 'system',
+            content: '你是歌词翻译引擎。把用户输入的歌词逐行翻译为简体中文。' +
+              '输入每行格式为「行号|歌词」。输出必须：' +
+              '1) 行数与输入完全一致；2) 每行以相同的行号和「|」开头；' +
+              '3) 空行/纯符号行保持原样；4) 只输出译文，不要任何解释或额外内容。'
+          },
+          { role: 'user', content: numbered }
+        ]
+      })
+    }).then(function (response) {
+      if (!response.ok) throw new Error('Bilibili 翻译 API HTTP ' + response.status);
+      return response.json();
+    }).then(function (data) {
+      var content = data && data.choices && data.choices[0] &&
+        data.choices[0].message && data.choices[0].message.content;
+      var map = {};
+      String(content || '').split('\n').forEach(function (line) {
+        var match = line.match(/^\s*(\d+)\s*\|\s*(.*)$/);
+        if (match) map[parseInt(match[1], 10)] = match[2].trim();
+      });
+      var out = lines.map(function (line, index) {
+        var parts = splitLrcLine(line);
+        var translated = Object.prototype.hasOwnProperty.call(map, index + 1)
+          ? map[index + 1]
+          : '';
+        return parts.stamps + translated;
+      });
+      var result = out.join('\n').replace(/\n+$/, '');
+      if (!result.replace(/\[[^\]]*\]/g, '').trim()) {
+        throw new Error('Bilibili 翻译 API 返回为空');
+      }
+      return result;
+    });
+  }
+
+  /** 按当前配置从原始歌词重新计算 track.lyrics 并返回是否变化 */
+  function recomputeTrackLyrics() {
+    if (!state.track) return false;
+    var rawOriginal = (state.track._rawLyrics || '').replace(/\n+$/, '');
+    var rawTranslation = (state.track._rawTranslation || '').replace(/\n+$/, '');
+    var originalPlain = stripLrc(capBytes(rawOriginal, 40000));
+    var originalLrc = capBytes(rawOriginal, 40000);
+    var translationPlain = stripLrc(capBytes(rawTranslation, 40000));
+    var translationLrc = capBytes(rawTranslation, 40000);
+
+    var finalLyrics;
+    if (state.asTextSource === 'translation' && translationLrc && !isMostlyChinese(rawOriginal)) {
+      finalLyrics = state.asTextFormat === 'lrc' ? translationLrc : translationPlain;
+    } else {
+      // 翻译模式取不到翻译，或中文歌词 → 原文透传
+      finalLyrics = state.asTextFormat === 'lrc' ? originalLrc : originalPlain;
+    }
+    finalLyrics = finalLyrics.replace(/\n+$/, '');
+    if (finalLyrics === state.track.lyrics) return false;
+    state.track.lyrics = finalLyrics;
+    return true;
+  }
+
+  /**
+   * api-fallback：翻译模式下取不到软件翻译时，异步请求 Bilibili API 翻译。
+   * 成功后把结果写入 _rawTranslation 并重推 track；失败则保持原文透传。
+   */
+  function maybeTranslateWithApi() {
+    if (!state.asTextApiFallback) return;
+    if (state.asTextSource !== 'translation') return;
+    if (!state.track || state.track._rawTranslation) return;
+    var original = (state.track._rawLyrics || '').replace(/\n+$/, '');
+    if (!original) return;
+    if (isMostlyChinese(original)) return;  // 中文歌词：无需翻译，直接透传
+    if (state.track._apiTranslationPending) return;
+    state.track._apiTranslationPending = true;
+    translateLyricsViaBilibili(original)
+      .then(function (translated) {
+        if (state.track && !state.track._rawTranslation && translated) {
+          state.track._rawTranslation = translated;
+          if (recomputeTrackLyrics()) pushTrack();
+        }
+      })
+      .catch(function (error) {
+        // 翻译失败：保持原文透传，静默处理（下次换歌会重试）
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('[moekoe-mpris] api-fallback 翻译失败:', error && error.message);
+        }
+      })
+      .then(function () {
+        if (state.track) state.track._apiTranslationPending = false;
+      });
   }
 
   /* ---------------- 与本地程序通信 ---------------- */
@@ -532,6 +679,8 @@ function extractLyricsMeta(data, song) {
     }
 
     state.position = position;
+    // 翻译模式 + api-fallback：软件翻译缺失时异步补 Bilibili API 翻译
+    maybeTranslateWithApi();
     pushStatus(trackChanged);
   }
 
@@ -571,23 +720,12 @@ function extractLyricsMeta(data, song) {
           // 更新 xesam:asText 配置
           if (typeof message.asTextFormat === 'string') state.asTextFormat = message.asTextFormat;
           if (typeof message.asTextSource === 'string') state.asTextSource = message.asTextSource;
+          if (typeof message.asTextApiFallback === 'boolean') state.asTextApiFallback = message.asTextApiFallback;
           // 配置变更后若有歌词，重新计算并推送
           if (state.track && (state.track.lyrics || state.track.lyrics === '')) {
-            var rawOriginal = (state.track._rawLyrics || '').replace(/\n+$/, '');
-            var rawTranslation = (state.track._rawTranslation || '').replace(/\n+$/, '');
-            var originalPlain = stripLrc(capBytes(rawOriginal, 40000));
-            var originalLrc = capBytes(rawOriginal, 40000);
-            var translationPlain = stripLrc(capBytes(rawTranslation, 40000));
-            var translationLrc = capBytes(rawTranslation, 40000);
-
-            var finalLyrics = originalPlain;
-            if (state.asTextSource === 'translation') {
-              finalLyrics = state.asTextFormat === 'lrc' ? translationLrc : translationPlain;
-            } else {
-              finalLyrics = state.asTextFormat === 'lrc' ? originalLrc : originalPlain;
-            }
-            state.track.lyrics = finalLyrics;
-            pushTrack();
+            if (recomputeTrackLyrics()) pushTrack();
+            // 刚打开 api-fallback 且当前没有翻译 → 异步补 API 翻译
+            maybeTranslateWithApi();
           }
         }
       } else if (message.type === 'control') {
@@ -614,7 +752,8 @@ function extractLyricsMeta(data, song) {
       isPlaying: state.isPlaying,
       sentCount: state.sentCount,
       asTextFormat: state.asTextFormat,
-      asTextSource: state.asTextSource
+      asTextSource: state.asTextSource,
+      asTextApiFallback: state.asTextApiFallback
     };
   }
 
