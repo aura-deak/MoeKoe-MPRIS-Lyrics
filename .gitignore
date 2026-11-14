@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.zip
 dist/
+debug.txt
+fix_test.py
+fix.py
+.workbuddy/memory/2026-11-08.md
+.workbuddy/memory/MEMORY.md
