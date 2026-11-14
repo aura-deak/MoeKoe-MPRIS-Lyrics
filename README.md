@@ -2,8 +2,8 @@
 
 ⚠️VIBE CODING WARNING!
 
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/710cd88c-da65-41c1-bece-79b8bab9bada" />
-图中终端歌词显示为mpris-lyrics，悬浮歌词显示为wshowlyrics  
+![效果演示](image.png)
+图中终端歌词显示为mpris-lyrics，悬浮歌词显示为wshowlyrics，状态栏歌词为noctalia的[Media Lyrics](https://noctalia.dev/plugins/community/media-lyrics)  
 
 ---
 为 **MoeKoe Music** 提供 Linux 下的 **MPRIS2** 协议支持：在会话 D-Bus 上注册
